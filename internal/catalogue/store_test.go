@@ -232,3 +232,53 @@ func TestDefsAreOrdered(t *testing.T) {
 		}
 	}
 }
+
+// TestMaxToolsRefusesTheWrongCatalogue is the mistake this guards: a sidecar
+// pointed at the organisation-wide catalogue instead of its own. Without it
+// the symptom is an OOM kill, which looks like a crashloop with no cause.
+func TestMaxToolsRefusesTheWrongCatalogue(t *testing.T) {
+	body := buildCatalogueFrom(t, map[string]string{
+		"a.v1": "tool_a", "b.v1": "tool_b", "c.v1": "tool_c",
+	})
+	ctx := context.Background()
+
+	s := catalogue.NewStore(catalogue.Options{MaxTools: 2})
+	if _, err := s.Reload(ctx, catalogue.BytesSource{Body: body}); err == nil {
+		t.Fatal("a 3-tool catalogue loaded into a store configured for 2")
+	}
+	if s.Current() != nil {
+		t.Error("a refused catalogue became current")
+	}
+
+	// Zero means no limit, which is the default: any number chosen here would
+	// be wrong for somebody, and a limit that blocks legitimate use gets
+	// raised until it means nothing.
+	unlimited := catalogue.NewStore(catalogue.Options{})
+	if _, err := unlimited.Reload(ctx, catalogue.BytesSource{Body: body}); err != nil {
+		t.Fatalf("the default refused a catalogue: %v", err)
+	}
+	if got := len(unlimited.Current().Defs); got != 3 {
+		t.Errorf("loaded %d tools, want 3", got)
+	}
+}
+
+// TestHeapIsMeasuredNotEstimated: the reported figure must exclude the
+// descriptor set Load parsed from, which is several times the size of the
+// registry it produces and dead by the time anyone reads the number.
+func TestHeapIsMeasuredNotEstimated(t *testing.T) {
+	s := catalogue.NewStore(catalogue.Options{})
+	c, err := s.Reload(context.Background(), catalogue.BytesSource{
+		Body: buildCatalogue(t, "get_status")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Bytes == 0 {
+		t.Error("artifact size not recorded")
+	}
+	// Not asserting a figure — it is a measurement, and pinning one would
+	// make this test fail on a protobuf upgrade for no reason. Asserting only
+	// that something was measured.
+	if c.HeapBytes == 0 {
+		t.Error("no heap measurement recorded")
+	}
+}

@@ -3,7 +3,10 @@
 ## Built
 
 - `internal/catalogue` — load, verify, digest, retain. `garmd serve
-  --catalogue` reports `(version, digest)` and lists what it serves.
+  --catalogue` reports `(version, digest)`, what the catalogue costs, and
+  lists what it serves. A byte ceiling guards pathological input;
+  `--max-tools` is an opt-in budget for catching a deployment pointed at the
+  wrong catalogue.
 - `internal/transport` — the Invoker and Discoverer ports. No adapter.
 - `internal/tool` — `Def`, the in-memory declaration.
 

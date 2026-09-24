@@ -32,6 +32,7 @@ type Store struct {
 
 	keepDepth int
 	ttl       time.Duration
+	maxTools  int
 	now       func() time.Time
 }
 
@@ -61,13 +62,27 @@ type Options struct {
 	// a month.
 	TTL time.Duration
 
+	// MaxTools refuses a catalogue declaring more than this. Zero means no
+	// limit, which is the default.
+	//
+	// There is no sensible default number. Any figure picked here is wrong
+	// for somebody, and a limit that blocks legitimate use gets raised until
+	// it means nothing. So it is opt-in, and the count is logged either way —
+	// an operator who never sets it still sees what arrived.
+	//
+	// What it guards is a specific and likely mistake: pointing a sidecar at
+	// the organisation-wide catalogue instead of the one scoped to that
+	// deployment. Without it the symptom is an OOM kill, which looks like a
+	// crashloop with no cause.
+	MaxTools int
+
 	// Now is injectable so retention can be tested without sleeping.
 	Now func() time.Time
 }
 
 // NewStore builds an empty store. Nothing is served until a Reload succeeds.
 func NewStore(o Options) *Store {
-	s := &Store{keepDepth: o.KeepDepth, ttl: o.TTL, now: o.Now}
+	s := &Store{keepDepth: o.KeepDepth, ttl: o.TTL, maxTools: o.MaxTools, now: o.Now}
 	if o.KeepDepth == 0 {
 		s.keepDepth = 1
 	}
@@ -82,6 +97,10 @@ func NewStore(o Options) *Store {
 	}
 	return s
 }
+
+// MaxTools is the configured tool ceiling, zero meaning none. Reported so a
+// startup line can state the budget alongside what arrived.
+func (s *Store) MaxTools() int { return s.maxTools }
 
 // Current is the catalogue to serve a request with. Nil before the first
 // successful Reload.
@@ -106,9 +125,23 @@ func (s *Store) Reload(ctx context.Context, src Source) (*Catalogue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading catalogue from %s: %w", src, err)
 	}
+	// Measured around Load rather than inside it: the FileDescriptorSet it
+	// parses from is several times the size of the registry it produces, and
+	// it is dead by the time this returns. Counting it would tell an operator
+	// their catalogue costs half again what it does.
+	before := HeapInUse()
 	next, err := Load(body, s.now)
 	if err != nil {
 		return nil, err
+	}
+	if after := HeapInUse(); after > before {
+		next.HeapBytes = after - before
+	}
+	if s.maxTools > 0 && len(next.Defs) > s.maxTools {
+		return nil, fmt.Errorf("catalogue %s declares %d tools; this process is "+
+			"configured for %d. Either it is the wrong catalogue for this deployment, "+
+			"or raise the limit deliberately",
+			next.Digest, len(next.Defs), s.maxTools)
 	}
 
 	prev := s.current.Load()

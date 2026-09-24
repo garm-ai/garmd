@@ -65,22 +65,42 @@ func version() string {
 	return info.Main.Version
 }
 
+// bytesHuman keeps a startup line readable. Binary units, because the numbers
+// it prints are memory and file sizes rather than anything a disk vendor
+// measured.
+func bytesHuman(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGT"[exp])
+}
+
 func newServeCmd() *cobra.Command {
 	var cataloguePath string
+	var maxTools int
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the tool plane",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runServe(cmd, cataloguePath)
+			return runServe(cmd, cataloguePath, maxTools)
 		},
 	}
 	cmd.Flags().StringVar(&cataloguePath, "catalogue", "",
 		"Path to the catalogue artifact this process serves")
+	cmd.Flags().IntVar(&maxTools, "max-tools", 0,
+		"Refuse a catalogue declaring more tools than this. 0 means no limit; "+
+			"set it to catch a deployment pointed at the wrong catalogue")
 	return cmd
 }
 
-func runServe(cmd *cobra.Command, path string) error {
+func runServe(cmd *cobra.Command, path string, maxTools int) error {
 	// A tool plane with no catalogue serves nothing. Saying so is better than
 	// binding a listener that answers 404 — that is the failure nothing
 	// downstream can detect.
@@ -89,7 +109,7 @@ func runServe(cmd *cobra.Command, path string) error {
 			"declares, and will not bind a listener it has nothing to serve on")
 	}
 
-	store := catalogue.NewStore(catalogue.Options{})
+	store := catalogue.NewStore(catalogue.Options{MaxTools: maxTools})
 	cat, err := store.Reload(cmd.Context(), catalogue.FileSource{Path: path})
 	if err != nil {
 		return err
@@ -105,6 +125,18 @@ func runServe(cmd *cobra.Command, path string) error {
 	}
 	fmt.Fprintf(out, "  annotation schema v%d, %d compartment(s), %d tool set(s)\n",
 		cat.SchemaVersion, len(cat.Compartments), len(cat.ToolSets))
+
+	// The size line is always printed, limit or not. What it guards against
+	// is a deployment pointed at the organisation-wide catalogue rather than
+	// its own, and an operator who never sets a limit should still be able to
+	// see that happen.
+	budget := "no limit set"
+	if m := store.MaxTools(); m > 0 {
+		budget = fmt.Sprintf("limit %d", m)
+	}
+	fmt.Fprintf(out, "  %s, %s held, %d tool(s), %s\n",
+		bytesHuman(int64(cat.Bytes)), bytesHuman(int64(cat.HeapBytes)), len(cat.Defs), budget)
+
 	fmt.Fprintf(out, "%d tool(s) declared:\n", len(cat.Defs))
 	for _, d := range cat.Defs {
 		shown := ""

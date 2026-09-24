@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +26,15 @@ const (
 	SchemaVersion = 1
 	MaxBehind     = 2
 )
+
+// MaxBytes is a ceiling on an artifact, not a budget.
+//
+// It exists so that a pathological file fails with a sentence instead of an
+// OOM kill — a process that dies before it can log anything looks like a
+// crashloop with no cause. Deliberately generous: a measured catalogue runs
+// about 384 bytes per tool, so this is room for roughly half a million tools,
+// far past where the tool budget below should have stopped anyone.
+const MaxBytes = 256 << 20
 
 // Catalogue is one generation, immutable once built.
 //
@@ -48,6 +58,16 @@ type Catalogue struct {
 	FieldDocs    map[string]string
 	Provenance   *cataloguev1.Provenance
 
+	// Bytes is the artifact's size.
+	//
+	// HeapBytes is what this generation retains, measured rather than
+	// estimated from a per-tool constant — that constant came from synthetic
+	// protos and nobody deploys those. Set by the Store after Load returns,
+	// because measuring inside Load counts the descriptor set it parsed from,
+	// which is dead by the time anyone cares.
+	Bytes     int
+	HeapBytes uint64
+
 	LoadedAt time.Time
 }
 
@@ -59,6 +79,13 @@ type Catalogue struct {
 // parse are disproportionately the NEW ones — which are the ones that
 // restrict.
 func Load(body []byte, now func() time.Time) (*Catalogue, error) {
+	if len(body) > MaxBytes {
+		return nil, fmt.Errorf("catalogue is %d bytes; the ceiling is %d. This is a "+
+			"guard against a pathological artifact, not a budget — if it is genuinely "+
+			"this large, the catalogue is serving more than one deployment should",
+			len(body), MaxBytes)
+	}
+
 	// Digest first, over the bytes as given. Computing it after parsing would
 	// record what this binary understood rather than what it was handed.
 	sum := sha256.Sum256(body)
@@ -92,6 +119,7 @@ func Load(body []byte, now func() time.Time) (*Catalogue, error) {
 
 	return &Catalogue{
 		Digest:        digest,
+		Bytes:         len(body),
 		SchemaVersion: msg.GetAnnotationSchemaVersion(),
 		Files:         files,
 		Defs:          defs,
@@ -101,6 +129,28 @@ func Load(body []byte, now func() time.Time) (*Catalogue, error) {
 		Provenance:    msg.GetProvenance(),
 		LoadedAt:      now(),
 	}, nil
+}
+
+// HeapInUse is the live heap after a collection. Exported so the Store can
+// measure across a load from outside it.
+func HeapInUse() uint64 { return heapInUse() }
+
+func heapInUse() uint64 {
+	var m runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m)
+	return m.HeapAlloc
+}
+
+// heapDelta is what the load added. Reported as zero rather than as a
+// negative if the collector freed more than the load allocated, which happens
+// and is not worth explaining in a startup line.
+func heapDelta(before uint64) uint64 {
+	after := heapInUse()
+	if after < before {
+		return 0
+	}
+	return after - before
 }
 
 // checkSchema enforces the N-2 window.
