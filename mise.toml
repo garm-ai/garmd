@@ -1,0 +1,29 @@
+# Toolchain and tasks for garmd. `mise install` gets you a working checkout;
+# `mise run ci` is exactly what CI runs.
+#
+# Task names match the other garm-ai repositories on purpose: `mise run test`
+# means the same thing everywhere, so moving between repositories costs no
+# relearning. There is no `gen` task yet because there are no protos yet.
+
+[tools]
+go = "1.26"
+
+[tasks.build]
+description = "Build every package"
+run = "go build ./..."
+
+[tasks.test]
+description = "Run the tests"
+run = "go test ./... -race -count=1"
+
+[tasks.lint]
+description = "Vet the Go"
+run = "go vet ./..."
+
+[tasks.fmt]
+description = "Format"
+run = "go fmt ./..."
+
+[tasks.ci]
+description = "Everything CI runs"
+depends = ["lint", "build", "test"]

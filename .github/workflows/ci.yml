@@ -1,0 +1,66 @@
+# CI for garmd.
+#
+# Two jobs. The first is the ordinary one. The second asserts the boundaries
+# this repository exists to hold — and they are asserted rather than
+# documented because a single careless import would end either one silently.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+      - run: mise run lint
+      - run: mise run build
+      # -race because the plan cache is shared across concurrent requests by
+      # design, so a data race there is a governance bug, not a flake.
+      - run: mise run test
+
+  boundaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      # garmd must never build-depend on a repository that implements tools.
+      # A catalogue crosses that line as DATA, loaded at boot — never as an
+      # import. This is the inversion the whole architecture buys: garmd's
+      # build sees no tool protos at all.
+      - name: no dependency on any tool repository
+        run: |
+          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/(examples|tools|agent)'; then
+            echo "::error::garmd build-depends on a tool repository; a catalogue is data, not an import" >&2
+            exit 1
+          fi
+          echo "clean: garmd depends on no tool repository"
+
+      # The tool-side runtime is what a tool service imports. A daemon
+      # importing it would have the dependency backwards, and would drag the
+      # enforcing side into a consumer's graph the first time anyone reused
+      # a type.
+      - name: no dependency on the tool runtime
+        run: |
+          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/tool-(go|python)'; then
+            echo "::error::garmd depends on the tool-side runtime; that inverts the boundary" >&2
+            exit 1
+          fi
+          echo "clean: garmd depends on no tool runtime"
