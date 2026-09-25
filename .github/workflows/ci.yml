@@ -67,6 +67,25 @@ jobs:
           fi
           echo "clean: garmd depends on no tool repository"
 
+      # The embedded NATS server is a TEST dependency and must stay one.
+      #
+      # It is in go.mod because the transport and stream tests run against a
+      # real broker rather than a mock. `go list -deps ./...` excludes test
+      # imports, so the day a non-test file imports it this check fails —
+      # which is the point: a daemon that can start a broker is a daemon that
+      # will, on someone's laptop, in production.
+      #
+      # Storage clients are named here for the same reason. A durable audit
+      # store belongs behind a forwarder reading the stream, not inside the
+      # process deciding what a caller may do.
+      - name: the broker and the storage clients stay out of the build
+        run: |
+          if go list -deps ./... 2>/dev/null | grep -E 'nats-server|go-duckdb|minio-go'; then
+            echo "::error::garmd build-depends on an embedded broker or a storage client" >&2
+            exit 1
+          fi
+          echo "clean: the embedded server is test-only and no storage client is linked"
+
       # The tool-side runtime is what a tool service imports. A daemon
       # importing it would have the dependency backwards, and would drag the
       # enforcing side into a consumer's graph the first time anyone reused

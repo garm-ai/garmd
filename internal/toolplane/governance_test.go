@@ -301,6 +301,7 @@ func TestFailClosedIsRefusedEvenWithEveryStepConfigured(t *testing.T) {
 type fakeSink struct {
 	mu        sync.Mutex
 	written   []ledger.Outcome
+	ids       []string
 	err       error
 	retention time.Duration
 }
@@ -312,7 +313,14 @@ func (f *fakeSink) Write(_ context.Context, ev ledger.Event) error {
 		return f.err
 	}
 	f.written = append(f.written, ev.Outcome)
+	f.ids = append(f.ids, ev.ID)
 	return nil
+}
+
+func (f *fakeSink) eventIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.ids...)
 }
 
 func (f *fakeSink) Retention() time.Duration { return f.retention }
@@ -524,5 +532,74 @@ func auditPrincipal() *Principal {
 		Kind:      toolv1.PrincipalKind_PRINCIPAL_KIND_USER,
 		Clearance: toolv1.Clearance_CLEARANCE_RESTRICTED,
 		Verbs:     NewVerbSet(toolv1.Verb_VERB_READ),
+	}
+}
+
+// The intent row and the outcome row are two writes of ONE call, and the
+// event id is the only thing tying them together.
+//
+// Without it "started and never finished" — the signal an intent row exists to
+// produce — cannot be answered at all: the stream holds an intent and an
+// outcome with nothing saying they belong to the same call. The id is minted
+// where the call is first observed, so both writes carry it.
+func TestTheIntentAndTheOutcomeOfOneCallShareOneEventID(t *testing.T) {
+	sink := &fakeSink{}
+	c := coreWith(t, CoreConfig{Audit: sink})
+	def := audited(true)
+	if err := c.AddTools([]ToolDef{def}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := func(context.Context, proto.Message) (proto.Message, error) {
+		return auditProfile(), nil
+	}
+	if err := c.Register(def.FullMethod, func() proto.Message { return auditProfile() }, resolver); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Invoke(context.Background(), auditPrincipal(), def.FullMethod, auditProfile()); err != nil {
+		t.Fatalf("the call failed: %v", err)
+	}
+
+	ids := sink.eventIDs()
+	if len(ids) != 2 {
+		t.Fatalf("the sink saw %d writes, want 2", len(ids))
+	}
+	if ids[0] == "" {
+		t.Fatal("the audit record carries no event id; delivery is at-least-once and " +
+			"consumers dedupe on it, so an empty id makes every redelivery a new row")
+	}
+	if ids[0] != ids[1] {
+		t.Errorf("the intent is %q and the outcome is %q; two writes of one call must "+
+			"carry one id or they cannot be matched", ids[0], ids[1])
+	}
+}
+
+// Two calls are two rows, and a shared id would merge them in any consumer
+// that dedupes — which is every consumer, because delivery is at-least-once.
+func TestTwoCallsDoNotShareAnEventID(t *testing.T) {
+	sink := &fakeSink{}
+	c := coreWith(t, CoreConfig{Audit: sink})
+	def := audited(false)
+	if err := c.AddTools([]ToolDef{def}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := func(context.Context, proto.Message) (proto.Message, error) {
+		return auditProfile(), nil
+	}
+	if err := c.Register(def.FullMethod, func() proto.Message { return auditProfile() }, resolver); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := c.Invoke(context.Background(), auditPrincipal(), def.FullMethod, auditProfile()); err != nil {
+			t.Fatalf("call %d failed: %v", i, err)
+		}
+	}
+
+	ids := sink.eventIDs()
+	if len(ids) != 4 {
+		t.Fatalf("the sink saw %d writes, want 4", len(ids))
+	}
+	if ids[0] == ids[2] {
+		t.Errorf("both calls were recorded under id %q; a consumer deduping on the id "+
+			"would keep one of them", ids[0])
 	}
 }

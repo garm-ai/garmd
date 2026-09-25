@@ -681,6 +681,18 @@ func (c *Core) auditOutcome(ctx context.Context, t ToolDef, ev ledger.Event) {
 // row after a rebuild (spec §9).
 func (c *Core) newEvent(p *Principal, procedure string) ledger.Event {
 	ev := ledger.Event{
+		// The id belongs to the CALL and is minted here, where the call is
+		// first observed, because everything downstream dedupes on it.
+		// Delivery to the lake is at-least-once, so a redelivered event has
+		// to carry the id it carried the first time; a publisher minting ids
+		// while sending would give every retry a fresh one and make
+		// duplicates indistinguishable from distinct calls.
+		//
+		// It is also the only thing tying an audited call's intent row to its
+		// outcome row. Two writes, one id — without it the two halves of a
+		// fail_closed call cannot be matched at all, and "started and never
+		// finished" stops being answerable.
+		ID:      ledger.NewEventID(),
 		Time:    time.Now(),
 		Tool:    procedure,
 		Outcome: ledger.OutcomeDenied,

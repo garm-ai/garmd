@@ -19,12 +19,18 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	natsjs "github.com/nats-io/nats.go/jetstream"
 	"github.com/spf13/cobra"
 
+	"github.com/garm-ai/garm/contracts/audit"
+	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/garm/contracts/wire"
 	"github.com/garm-ai/garm/policy"
+	auditjs "github.com/garm-ai/garmd/internal/audit/jetstream"
 	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/record"
+	recordjs "github.com/garm-ai/garmd/internal/record/jetstream"
 	"github.com/garm-ai/garmd/internal/serve"
 	garmnats "github.com/garm-ai/garmd/internal/transport/nats"
 )
@@ -99,6 +105,8 @@ func newServeCmd() *cobra.Command {
 	var cataloguePath, natsURL, listen string
 	var jwksURL, issuer, audience, hashKeyFile string
 	var maxTools int
+	var auditRetention time.Duration
+	var ledgerStream bool
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the tool plane",
@@ -113,6 +121,15 @@ func newServeCmd() *cobra.Command {
 				issuer:    issuer,
 				audience:  audience,
 				hashKey:   hashKeyFile,
+				// The FLAG being set is what turns the audit stream on, not
+				// its value: zero is a meaningful retention (indefinite, per
+				// the Sink contract) and the strongest claim available, so it
+				// cannot double as "unconfigured". Unconfigured leaves the
+				// Sink nil, and a catalogue with an audited tool then refuses
+				// to start — which is correct.
+				audit:          cmd.Flags().Changed("audit-stream-retention"),
+				auditRetention: auditRetention,
+				ledgerStream:   ledgerStream,
 			})
 		},
 	}
@@ -138,6 +155,17 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&audience, "audience", "garm",
 		"Audience minted tokens must name. A token for another service must not "+
 			"be spendable here")
+	cmd.Flags().DurationVar(&auditRetention, "audit-stream-retention", 0,
+		"How long the audit pipeline keeps a record, and publish the audit stream to "+
+			"JetStream on --nats. This is an ASSERTION about the object store behind "+
+			"the forwarder, which garmd cannot read: the mount check refuses a tool "+
+			"asking for longer, so a value longer than the truth makes that check pass "+
+			"against a promise that is false. 0 means indefinite. Unset means no audit "+
+			"stream at all, and a catalogue declaring an audited tool will not start")
+	cmd.Flags().BoolVar(&ledgerStream, "ledger-stream", false,
+		"Publish the ledger to JetStream on --nats, in batches, falling back to stdout "+
+			"for anything that cannot be published. Off by default: without it every "+
+			"row is a log line a rotation deletes")
 	cmd.Flags().StringVar(&hashKeyFile, "hash-key-file", "",
 		"File holding the key for hash redactions. Required, and it must be the "+
 			"SAME key on every replica and across restarts: a key that changes "+
@@ -155,6 +183,10 @@ type serveOpts struct {
 	issuer    string
 	audience  string
 	hashKey   string
+
+	audit          bool
+	auditRetention time.Duration
+	ledgerStream   bool
 }
 
 func runServe(cmd *cobra.Command, o serveOpts) error {
@@ -242,6 +274,15 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
 	tp := garmnats.New(nc)
 
+	// Where the two halves of the record go. They share a connection and
+	// nothing else: the ledger batches and degrades, the audit stream writes
+	// one message per call and may refuse one. See KNOWN-GAPS.md.
+	recorder, auditSink, closeRecord, err := records(cmd.Context(), nc, log, o)
+	if err != nil {
+		return err
+	}
+	defer closeRecord()
+
 	// The compartments a token may assert come from the CATALOGUE, not from
 	// this binary: an enterprise defines its own taxonomy and ships it in the
 	// artifact. A name the catalogue does not declare is dropped from the
@@ -280,18 +321,12 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 		Reconciler: rec,
 		Principals: authn.PrincipalFunc(verifier, log),
 		HashKey:    hashKey,
-		// slog for now. A bank needs this durable and tamper-evident, and
-		// KNOWN-GAPS.md says so rather than this line pretending otherwise.
-		Recorder: record.NewSlog(log),
-		// No audit sink is configured, and nothing in this repository
-		// implements one — that belongs in its own module, since a durable
-		// store has consumers and a release cadence of its own.
-		//
-		// Leaving it nil is safe rather than merely untidy: Prepare refuses
-		// to mount any tool declaring an audit stream, so a catalogue that
-		// needs one stops the process at startup instead of being served
-		// unaudited.
-		Audit: nil,
+		Recorder:   recorder,
+		// Nil unless --audit-stream-retention was given, and nil is safe
+		// rather than merely untidy: Prepare refuses to mount any tool
+		// declaring an audit stream, so a catalogue that needs one stops the
+		// process at startup instead of being served unaudited.
+		Audit: auditSink,
 	}
 
 	// Before the listener. A catalogue declaring supervision this deployment
@@ -318,7 +353,13 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go rec.Run(ctx)
+	// Closed once every in-flight call has finished. The buffered ledger is
+	// flushed AFTER that, because a call still running is a row not yet
+	// recorded, and flushing first would drop precisely the rows the
+	// shutdown produced.
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -328,6 +369,18 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	fmt.Fprintf(out, "listening on %s, routing over %s\n", o.listen, nc.ConnectedUrl())
 	fmt.Fprintf(out, "  callers verified against %s (issuer %s, audience %s)\n",
 		o.jwksURL, o.issuer, o.audience)
+	if o.ledgerStream {
+		fmt.Fprintf(out, "  ledger batched to %s, falling back to stdout\n", wire.LedgerStream)
+	} else {
+		fmt.Fprintf(out, "  ledger to stdout only; a log rotation deletes it\n")
+	}
+	if auditSink != nil {
+		fmt.Fprintf(out, "  audit stream %s, retention asserted as %s\n",
+			wire.AuditStream, retentionText(auditSink.Retention()))
+	} else {
+		fmt.Fprintf(out, "  no audit stream; a catalogue declaring an audited tool "+
+			"would not have started\n")
+	}
 	fmt.Fprintf(out, "\n"+
 		"  Every call goes through the chain. Steps 1, 2, 3, 8 and 9 are\n"+
 		"  implemented; instance authorization, grants and notify are NOT, and a\n"+
@@ -337,8 +390,75 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-drained
 	fmt.Fprintln(out, "stopped")
 	return nil
+}
+
+// records builds the two recording paths and returns a function that flushes
+// the batched one.
+//
+// They are built together because they share the JetStream context and are
+// constantly confused for each other, and separating them here is where the
+// difference is easiest to state: the Recorder cannot fail a call and so
+// buffers, the Sink exists to be able to fail one and so does not.
+func records(ctx context.Context, nc *nats.Conn, log *slog.Logger, o serveOpts) (
+	ledger.Recorder, audit.Sink, func(), error) {
+
+	// The fallback is the same slog recorder this daemon used before there
+	// was a stream at all. It is what everything the batcher cannot publish
+	// degrades to, so a broker outage costs durability and not rows.
+	fallback := record.NewSlog(log)
+	recorder := ledger.Recorder(fallback)
+	closeRecord := func() {}
+
+	if !o.ledgerStream && !o.audit {
+		return recorder, nil, closeRecord, nil
+	}
+
+	js, err := natsjs.New(nc)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("opening JetStream on %s: %w", o.natsURL, err)
+	}
+
+	if o.ledgerStream {
+		pub, err := recordjs.New(recordjs.Config{JS: js, Fallback: fallback, Log: log})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("the ledger publisher: %w", err)
+		}
+		recorder = pub
+		// context.Background rather than the serve context, which is already
+		// cancelled by the time this runs — Close strips cancellation for the
+		// same reason, and passing a live one here would only be a second
+		// place to get it wrong.
+		closeRecord = func() { _ = pub.Close(context.Background()) }
+	}
+
+	if !o.audit {
+		return recorder, nil, closeRecord, nil
+	}
+
+	// Before anything is served. A stream that drops records while acking
+	// them is worse than no stream, because a fail_closed tool reads the ack
+	// as the guarantee it asked for — so the misconfiguration has to stop the
+	// process rather than be discovered by whoever goes looking for the row.
+	if err := auditjs.AssertStream(ctx, js, log); err != nil {
+		closeRecord()
+		return nil, nil, nil, fmt.Errorf("this deployment cannot audit: %w", err)
+	}
+	sink, err := auditjs.New(auditjs.Config{JS: js, Retention: o.auditRetention})
+	if err != nil {
+		closeRecord()
+		return nil, nil, nil, fmt.Errorf("the audit sink: %w", err)
+	}
+	return recorder, sink, closeRecord, nil
+}
+
+func retentionText(d time.Duration) string {
+	if d == 0 {
+		return "indefinite"
+	}
+	return d.String()
 }
 
 // readHashKey loads the key that keys hash redactions.
