@@ -20,17 +20,31 @@ package transport
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/protobuf/proto"
 )
 
+// ErrUnreachable is a tool the catalogue declares with nothing serving it.
+//
+// Distinguished from a failure because they are different people's problems:
+// unreachable is an operator's, and a tool that ran and failed is the
+// caller's. Collapsing them makes a missing deployment look like a broken
+// tool.
+var ErrUnreachable = errors.New("no service is serving this tool")
+
 // Invoker executes one tool call.
 //
-// The signature takes and returns proto.Message rather than a generated type
-// on purpose: garmd builds its requests as dynamic messages from catalogue
-// descriptors, and the wire bytes are identical either way.
+// The caller supplies BOTH messages. It holds the catalogue, so it is the only
+// side that knows what a reply should be unmarshalled into — and a transport
+// that had to know would have to be re-released whenever a catalogue changed,
+// which is the coupling this whole design removes.
+//
+// proto.Message rather than a generated type because garmd builds both from
+// catalogue descriptors as dynamic messages. The wire bytes are identical
+// either way.
 type Invoker interface {
-	Invoke(ctx context.Context, procedure string, req proto.Message) (proto.Message, error)
+	Invoke(ctx context.Context, procedure string, req, resp proto.Message) error
 }
 
 // Discoverer reports what is reachable.
