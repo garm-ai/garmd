@@ -13,9 +13,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/garm-ai/garm/contracts/wire"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 	"google.golang.org/protobuf/proto"
@@ -42,12 +42,6 @@ var (
 	_ transport.Discoverer = (*Transport)(nil)
 )
 
-// Subject maps a route to a NATS subject: the same string in two syntaxes, so
-// neither side keeps a mapping table that could disagree with the other's.
-func Subject(fullMethod string) string {
-	return strings.ReplaceAll(strings.TrimPrefix(fullMethod, "/"), "/", ".")
-}
-
 // Invoke sends a request and unmarshals the reply into resp.
 //
 // The deadline comes from ctx and nowhere else. A transport imposing its own
@@ -59,7 +53,7 @@ func (t *Transport) Invoke(ctx context.Context, procedure string, req, resp prot
 		return fmt.Errorf("marshalling the request for %s: %w", procedure, err)
 	}
 
-	msg, err := t.nc.RequestWithContext(ctx, Subject(procedure), body)
+	msg, err := t.nc.RequestWithContext(ctx, wire.Subject(procedure), body)
 	if err != nil {
 		if errors.Is(err, nats.ErrNoResponders) {
 			// Distinguished on purpose: nothing is listening on that subject,

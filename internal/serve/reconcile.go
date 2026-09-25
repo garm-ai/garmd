@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/garm-ai/garm/contracts/wire"
 	"github.com/garm-ai/garmd/internal/transport"
 )
 
@@ -94,7 +95,9 @@ func (r *Reconciler) sweep(ctx context.Context) {
 	// route is, and a parser would be a second one.
 	pkgOf := make(map[string]string, len(cat.Defs))
 	for _, d := range cat.Defs {
-		pkgOf[strings.ReplaceAll(strings.TrimPrefix(d.FullMethod, "/"), "/", ".")] = pkgOfFQN(d.FQN)
+		// The same function the tool side uses to decide where to listen.
+		// Deriving it separately here is how the two ends stop agreeing.
+		pkgOf[wire.Subject(d.FullMethod)] = pkgOfFQN(d.FQN)
 	}
 
 	bad := map[string]string{}
