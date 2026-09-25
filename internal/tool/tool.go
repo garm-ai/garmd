@@ -89,10 +89,20 @@ type Def struct {
 
 // Service is the proto service this tool belongs to, which is also the queue
 // group a NATS deployment balances over.
+//
+// Anything that is not "/service/method" yields nothing rather than a guess.
+// Half of a malformed route would still end up in a subject, and a call that
+// goes somewhere nobody meant is worse than one that visibly has nowhere to
+// go. A Def is a value type other packages construct directly, so this has to
+// hold for the zero value too, which the earlier form panicked on.
 func (d Def) Service() string {
-	i := strings.Index(d.FullMethod[1:], "/")
+	rest, ok := strings.CutPrefix(d.FullMethod, "/")
+	if !ok {
+		return ""
+	}
+	i := strings.Index(rest, "/")
 	if i < 0 {
 		return ""
 	}
-	return d.FullMethod[1 : i+1]
+	return rest[:i]
 }

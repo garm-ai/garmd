@@ -32,9 +32,16 @@ monorepo left them. But `serve` still calls the transport directly, so no
 request passes through it. Until it does, this routes and does not govern,
 and the startup warning means exactly what it says.
 
-**Coverage is uneven and the gaps are named.** The chain is at 48% and the
-catalogue at 81%; `serve` is at 38% (the reconciler is covered, the handler is
-not) and `transport/nats`, `record`, `tool` and `cmd/garmd` are at zero.
+**Coverage is uneven and the gaps are named.** `transport/nats` is at 92%,
+`serve` at 88%, `record` and `tool` at 100%, the catalogue at 81%. The chain
+is still at 48% and `cmd/garmd` at zero — the chain because it is not wired
+in, so a test of it would pin behaviour no request reaches, and `cmd/garmd`
+because it is flag parsing around a listener that is covered where it lives.
+
+What the transport tests do NOT cover is a real tool service on the other
+side: the fakes are plain NATS subscriptions, because importing
+`garm-ai/tool-go` for a faithful one is exactly the dependency CI refuses.
+Producer/consumer agreement belongs in a cross-repo test where both exist.
 
 Three test files did NOT come across from the monorepo, each for a reason
 rather than by omission: `mount_test.go` exercises the generated-registry
