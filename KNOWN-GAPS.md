@@ -60,32 +60,28 @@ catalogue loader, which took `GetLevel()` and nothing else: a tool could ask
 for a blocking, seven-year, payload-recording trail and mount cleanly against
 a recorder writing to stdout, just by saying `LEVEL_LEDGER`.
 
-## `audit.fail_closed` needs a contract change, not a sink
+## The audit stream has a seam but no implementation
 
-`fail_closed` says the call must not proceed unless it was recorded.
-`ledger.Recorder` says:
+`garm/contracts/audit.Sink` is the durable, separately-retained half of the
+record, and the half that MAY refuse a call. The chain uses it: an audited
+tool writes its intent before the resolver runs and its outcome after, and a
+failed write-ahead refuses the call when the tool declared `fail_closed`.
+Write-ahead rather than write-after because the alternative does not work for
+anything irreversible — recording afterwards and failing the response tells
+the caller the payment did not happen, when it did.
 
-```go
-// Record must not fail the call: implementations swallow their own
-// errors (logging them) and must be safe under a cancelled ctx.
-Record(ctx context.Context, ev Event)
-```
+Nothing here implements a Sink, so `garmd` runs with `Audit: nil` and any
+catalogue containing an audited tool refuses to start. That is the intended
+failure rather than a hole: nil cannot mean "audited tool served unaudited".
 
-No return value, and an explicit instruction not to fail the call. The two
-contradict, so `fail_closed` cannot be honoured by ANY implementation of the
-current interface — writing a durable sink behind it would not help. It needs
-a second method, or a second interface, that is allowed to refuse.
+A real Sink belongs in its own module — a durable store has consumers and a
+release cadence of its own, and it is the piece with a storage choice in it.
 
-That is a `garm/contracts` decision affecting both planes, not a garmd one,
-and it is the thing to settle before building the sink: a sink built against
-today's `Recorder` would be durable and still unable to keep the one promise
-that matters most.
-
-**The ledger is not durable.** `--catalogue` deployments record through
-`record.Slog`, so step 9 is a line on stdout. A tool declaring
-`audit: { fail_closed: true, retain_days: 2555 }` is satisfied today by
-something a log rotation will delete. The type system honours the
-declaration; the substrate does not. This is what the sink is for.
+**The ledger is not durable.** Deployments record through `record.Slog`, so
+step 9 is a line on stdout. That is now only true for tools that did NOT
+declare an audit stream — one that does will not mount without a Sink — but
+the ordinary ledger is still the thing a log rotation deletes, and it is the
+row an auditor queries for every other call.
 
 **A quarantine refusal leaves no ledger row.** The surface refuses a tool
 whose service implements a different contract BEFORE the chain runs, so that

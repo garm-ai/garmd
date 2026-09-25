@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -103,15 +104,10 @@ func (c *Core) unimplementedGovernance(t ToolDef) error {
 		// NewCore refuses to build without a Recorder, so the ledger is
 		// always there.
 	case toolv1.Audit_LEVEL_AUDIT:
-		// Deliberately unconditional, unlike the three above. LEVEL_AUDIT
-		// asks for a durable, separately retained audit stream, and there is
-		// no CoreConfig field to supply one because nothing in this
-		// repository implements it yet. When the sink lands this becomes a
-		// nil check like the others; until then a tool asking for seven years
-		// of retention must not mount against a Recorder that writes to
-		// stdout.
-		missing = append(missing, "audit.level LEVEL_AUDIT, and no audit stream exists "+
-			"yet — the ledger is not one (step 9 vs step 10)")
+		if c.audit == nil {
+			missing = append(missing, "audit.level LEVEL_AUDIT, and this deployment has "+
+				"no audit Sink — the ledger is not one, and a Recorder cannot refuse")
+		}
 	default:
 		missing = append(missing, fmt.Sprintf(
 			"audit.level %d, which is not a level this build knows how to emit", t.AuditLevel))
@@ -128,13 +124,38 @@ func (c *Core) unimplementedGovernance(t ToolDef) error {
 	// implementation of the current interface rather than merely by the ones
 	// written so far. Refusing is the only honest answer until the contract
 	// grows a recorder that can refuse.
+	// fail_closed is a property of the audit STREAM, not of the ledger:
+	// ledger.Recorder is documented "must not fail the call" and cannot honour
+	// it by construction. So it needs a Sink, and it needs the tool to have
+	// asked for one — fail_closed at LEVEL_LEDGER is a contradiction the
+	// author should hear about rather than have quietly downgraded.
 	if t.AuditFailClosed {
-		missing = append(missing, "audit.fail_closed, which no Recorder can honour — "+
-			"Record cannot fail a call by contract (step 9)")
+		switch {
+		case t.AuditLevel != toolv1.Audit_LEVEL_AUDIT:
+			missing = append(missing, "audit.fail_closed without audit.level LEVEL_AUDIT "+
+				"— only the audit stream may refuse a call; the ledger must not")
+		case c.audit == nil:
+			missing = append(missing, "audit.fail_closed, and this deployment has no "+
+				"audit Sink to refuse with")
+		}
 	}
+
+	// Retention is refused by COMPARISON, which is the only check here that
+	// can fail against a fully configured deployment. A sink keeping thirty
+	// days under a tool promising seven years is a promise discovered to be
+	// false by whoever goes looking for the row, years late.
 	if t.AuditRetainDays > 0 {
-		missing = append(missing, fmt.Sprintf(
-			"audit.retain_days %d, and nothing here retains anything", t.AuditRetainDays))
+		want := time.Duration(t.AuditRetainDays) * 24 * time.Hour
+		switch {
+		case c.audit == nil:
+			missing = append(missing, fmt.Sprintf(
+				"audit.retain_days %d, and this deployment has no audit Sink",
+				t.AuditRetainDays))
+		case c.audit.Retention() != 0 && c.audit.Retention() < want:
+			missing = append(missing, fmt.Sprintf(
+				"audit.retain_days %d (%s), and the configured audit Sink keeps only %s",
+				t.AuditRetainDays, want, c.audit.Retention()))
+		}
 	}
 	if t.AuditRecordRequest || t.AuditRecordResponse {
 		missing = append(missing, "audit.record_request/record_response, and a ledger "+

@@ -283,6 +283,15 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 		// slog for now. A bank needs this durable and tamper-evident, and
 		// KNOWN-GAPS.md says so rather than this line pretending otherwise.
 		Recorder: record.NewSlog(log),
+		// No audit sink is configured, and nothing in this repository
+		// implements one — that belongs in its own module, since a durable
+		// store has consumers and a release cadence of its own.
+		//
+		// Leaving it nil is safe rather than merely untidy: Prepare refuses
+		// to mount any tool declaring an audit stream, so a catalogue that
+		// needs one stops the process at startup instead of being served
+		// unaudited.
+		Audit: nil,
 	}
 
 	// Before the listener. A catalogue declaring supervision this deployment

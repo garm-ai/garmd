@@ -84,6 +84,7 @@ func (h *Handler) newPlane(cat *catalogue.Catalogue) (*plane, error) {
 		// in the artifact.
 		Compartments: cat.Compartments,
 		Recorder:     h.Recorder,
+		Audit:        h.Audit,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building the chain for catalogue %s: %w", cat.Digest, err)

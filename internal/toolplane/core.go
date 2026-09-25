@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/garm-ai/garm/contracts/audit"
 	"github.com/garm-ai/garm/contracts/callctx"
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"github.com/garm-ai/garm/contracts/ledger"
@@ -37,6 +38,7 @@ type Core struct {
 	reg      *policy.Registry
 	cache    *policy.Cache
 	recorder ledger.Recorder
+	audit    audit.Sink
 
 	// The pluggable steps. Nil means the step is NOT DECLARED and returns
 	// nil; it never means "the check failed and we carried on". See fgaPre.
@@ -132,6 +134,11 @@ type CoreConfig struct {
 	Compartments []*toolv1.Decl
 	Recorder     ledger.Recorder
 
+	// Audit is the durable, separately-retained stream — the half of the
+	// record that MAY refuse a call. Nil means no audit stream, which is safe
+	// only because AddTools then refuses to mount any tool that declares one.
+	Audit audit.Sink
+
 	// FGA, Grants and Notifier are the steps whose IMPLEMENTATION may vary
 	// (spec §2). What is not variable is whether they run: that is the fixed
 	// order in Invoke, which is code, not data.
@@ -165,6 +172,7 @@ func NewCore(cfg CoreConfig) (*Core, error) {
 		reg:       reg,
 		cache:     policy.NewCache(),
 		recorder:  cfg.Recorder,
+		audit:     cfg.Audit,
 		fga:       cfg.FGA,
 		grants:    cfg.Grants,
 		notifier:  cfg.Notifier,
@@ -455,6 +463,13 @@ func (c *Core) invoke(
 		// ledger that cannot publish must never turn a successful call
 		// into a failed one.
 		c.record(ctx, p, tool, ev)
+		// Every terminal path, refusals included. An audited tool's REFUSALS
+		// are audit-worthy too — "someone tried to move money and was turned
+		// away" is a row an auditor wants. So an outcome with no preceding
+		// intent means refused before the tool was reached, and an intent
+		// with no outcome means started and never accounted for. Both are
+		// legible, and neither is a gap.
+		c.auditOutcome(ctx, tool, ev)
 		if abort != nil {
 			panic(abort)
 		}
@@ -565,6 +580,21 @@ func (c *Core) invoke(
 	// itself: see withInvocationContext's own doc comment for why this is
 	// a value on a context the chain already owns, not a new path out of
 	// it.
+	// The audit write-ahead, and the LAST point at which refusing is still
+	// free. After the next line the tool has run.
+	//
+	// Write-ahead rather than write-after because the alternative does not
+	// work for anything irreversible: recording afterwards and failing the
+	// response would tell the caller the payment did not happen, when it did.
+	// Recording the intent first and refusing means the side effect never
+	// occurs, which is the only thing "fail closed" can mean for a tool whose
+	// effects cannot be undone.
+	if err := c.auditIntent(ctx, tool, ev); err != nil {
+		ev.Outcome = ledger.OutcomeDenied
+		ev.ErrorDetail = "audit write-ahead failed: " + err.Error()
+		return nil, fmt.Errorf("%w: the audit record could not be written", errUnavailable)
+	}
+
 	ctx = c.withInvocationContext(ctx, p)
 
 	resp, err = c.resolve(ctx, procedure, req, fn)
@@ -597,6 +627,48 @@ func (c *Core) invoke(
 	}
 	ev.Outcome = ledger.OutcomeOK
 	return resp, nil
+}
+
+// auditIntent writes the intent row for a tool that declared an audit stream.
+//
+// Nil sink and no declaration are both "nothing to do" — and the pairing is
+// what makes that safe: AddTools refuses to mount a tool declaring an audit
+// level when no Sink is configured, so reaching here with a declaration and
+// no sink is not a state a mounted Core can be in.
+//
+// Only fail_closed turns a write error into a refusal. A tool that asked for
+// an audit trail but not a blocking one gets the ordinary degrade: the error
+// is recorded and the call proceeds, because that is what it asked for.
+func (c *Core) auditIntent(ctx context.Context, t ToolDef, ev ledger.Event) error {
+	if c.audit == nil || t.AuditLevel != toolv1.Audit_LEVEL_AUDIT {
+		return nil
+	}
+	ev.Outcome = ledger.OutcomeIntent
+	err := c.audit.Write(ctx, ev)
+	if err == nil {
+		return nil
+	}
+	if t.AuditFailClosed {
+		return err
+	}
+	return nil
+}
+
+// auditOutcome writes what actually happened, and CANNOT refuse.
+//
+// By the time this runs the tool has run. Failing the call here would report a
+// side effect that did happen as one that did not, which is worse than the
+// missing row. It must still be loud: an intent with no matching outcome says
+// a call was authorised, started, and never accounted for.
+func (c *Core) auditOutcome(ctx context.Context, t ToolDef, ev ledger.Event) {
+	if c.audit == nil || t.AuditLevel != toolv1.Audit_LEVEL_AUDIT {
+		return
+	}
+	if err := c.audit.Write(ctx, ev); err != nil {
+		slog.Error("toolplane: the audit outcome could not be written; the stream now "+
+			"holds an intent with no outcome for this call",
+			"tool", t.FQN, "subject", ev.PrincipalSubject, "err", err)
+	}
 }
 
 // newEvent opens the one ledger row this call will produce.

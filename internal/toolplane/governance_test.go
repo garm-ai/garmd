@@ -2,8 +2,11 @@ package toolplane
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"github.com/garm-ai/garm/contracts/ledger"
@@ -86,7 +89,7 @@ func TestADeclarationThisDeploymentCannotHonourRefusesToMount(t *testing.T) {
 		{
 			"an audit stream that does not exist",
 			declaring(func(d *ToolDef) { d.AuditLevel = toolv1.Audit_LEVEL_AUDIT }),
-			"no audit stream exists",
+			"no audit Sink",
 		},
 		{
 			"instance authorization with no checker",
@@ -212,7 +215,7 @@ func TestTheRefusalNamesEveryMissingStepAtOnce(t *testing.T) {
 		t.Fatal("a tool declaring grants, an audit stream and authorization mounted " +
 			"on a Core with none of them")
 	}
-	for _, want := range []string{"GrantVerifier", "audit stream", "FGAChecker"} {
+	for _, want := range []string{"GrantVerifier", "audit Sink", "FGAChecker"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not mention %q, so fixing this tool takes more "+
 				"than one attempt: %v", want, err)
@@ -291,5 +294,235 @@ func TestFailClosedIsRefusedEvenWithEveryStepConfigured(t *testing.T) {
 	if err := c.AddTools([]ToolDef{def}); err == nil {
 		t.Fatal("a fail_closed tool mounted with every configurable step supplied; " +
 			"the ledger contract still cannot refuse a call, so the guarantee is false")
+	}
+}
+
+// fakeSink records what it was given and can be made to fail.
+type fakeSink struct {
+	mu        sync.Mutex
+	written   []ledger.Outcome
+	err       error
+	retention time.Duration
+}
+
+func (f *fakeSink) Write(_ context.Context, ev ledger.Event) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.written = append(f.written, ev.Outcome)
+	return nil
+}
+
+func (f *fakeSink) Retention() time.Duration { return f.retention }
+
+func (f *fakeSink) outcomes() []ledger.Outcome {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ledger.Outcome(nil), f.written...)
+}
+
+func audited(failClosed bool) ToolDef {
+	return declaring(func(d *ToolDef) {
+		d.AuditLevel = toolv1.Audit_LEVEL_AUDIT
+		d.AuditFailClosed = failClosed
+	})
+}
+
+// A sink that keeps less than the tool promises is refused at mount.
+//
+// This is the only refusal here that fires against a fully configured
+// deployment, and it is the one that catches a real operational mistake:
+// everything is wired, the tool says seven years, the bucket says thirty
+// days, and nobody finds out until someone goes looking for the row.
+func TestASinkThatKeepsLessThanTheToolPromisesIsRefused(t *testing.T) {
+	short := &fakeSink{retention: 30 * 24 * time.Hour}
+	c := coreWith(t, CoreConfig{Audit: short})
+	def := declaring(func(d *ToolDef) {
+		d.AuditLevel = toolv1.Audit_LEVEL_AUDIT
+		d.AuditRetainDays = 2555
+	})
+
+	err := c.AddTools([]ToolDef{def})
+	if err == nil {
+		t.Fatal("mounted; the tool promises seven years against a sink keeping thirty days")
+	}
+	if !strings.Contains(err.Error(), "2555") {
+		t.Errorf("the refusal does not say what was promised: %v", err)
+	}
+
+	// Indefinite retention satisfies any request, which is what zero means.
+	forever := &fakeSink{retention: 0}
+	c2 := coreWith(t, CoreConfig{Audit: forever})
+	if err := c2.AddTools([]ToolDef{def}); err != nil {
+		t.Errorf("a sink keeping things indefinitely was refused: %v", err)
+	}
+}
+
+// fail_closed at LEVEL_LEDGER is a contradiction, not a downgrade.
+//
+// Only the audit stream may refuse a call; the ledger is contractually
+// forbidden from it. Quietly accepting the pairing would leave an author
+// believing their call is gated on a record that can never gate it.
+func TestFailClosedWithoutTheAuditLevelIsAContradiction(t *testing.T) {
+	c := coreWith(t, CoreConfig{Audit: &fakeSink{}})
+	def := declaring(func(d *ToolDef) {
+		d.AuditLevel = toolv1.Audit_LEVEL_LEDGER
+		d.AuditFailClosed = true
+	})
+
+	err := c.AddTools([]ToolDef{def})
+	if err == nil {
+		t.Fatal("fail_closed mounted at LEVEL_LEDGER; the ledger must never refuse a call")
+	}
+	if !strings.Contains(err.Error(), "LEVEL_AUDIT") {
+		t.Errorf("the refusal does not point at the fix: %v", err)
+	}
+}
+
+// The write-ahead, and the reason it is a write-AHEAD.
+//
+// A fail_closed tool whose audit record cannot be written must not run. Not
+// "must return an error after running" — the side effect must never happen,
+// because for anything irreversible a post-hoc refusal tells the caller the
+// payment did not go out when it did.
+func TestAFailClosedToolDoesNotRunWhenItsAuditRecordCannotBeWritten(t *testing.T) {
+	broken := &fakeSink{err: errors.New("the audit store is unreachable")}
+	c := coreWith(t, CoreConfig{Audit: broken})
+	def := audited(true)
+	if err := c.AddTools([]ToolDef{def}); err != nil {
+		t.Fatal(err)
+	}
+
+	var ran bool
+	resolver := func(context.Context, proto.Message) (proto.Message, error) {
+		ran = true
+		return auditProfile(), nil
+	}
+	if err := c.Register(def.FullMethod, func() proto.Message { return auditProfile() }, resolver); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := c.Invoke(context.Background(), auditPrincipal(), def.FullMethod, auditProfile())
+	if err == nil {
+		t.Fatal("the call succeeded with no audit record; fail_closed means the side " +
+			"effect must not happen")
+	}
+	if ran {
+		t.Error("the tool RAN despite the audit write failing. For an irreversible tool " +
+			"this is the whole failure: the effect happened and the caller was told it " +
+			"did not")
+	}
+	if CodeOfForTest(err) != "unavailable" {
+		t.Errorf("code = %q, want unavailable: the audit store being down is an "+
+			"operator's problem, not a bad request", CodeOfForTest(err))
+	}
+}
+
+// The same tool, a working sink: it runs, and the stream holds intent then
+// outcome in that order.
+func TestAnAuditedCallWritesIntentThenOutcome(t *testing.T) {
+	sink := &fakeSink{}
+	c := coreWith(t, CoreConfig{Audit: sink})
+	def := audited(true)
+	if err := c.AddTools([]ToolDef{def}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := func(context.Context, proto.Message) (proto.Message, error) {
+		return auditProfile(), nil
+	}
+	if err := c.Register(def.FullMethod, func() proto.Message { return auditProfile() }, resolver); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.Invoke(context.Background(), auditPrincipal(), def.FullMethod, auditProfile()); err != nil {
+		t.Fatalf("the call failed: %v", err)
+	}
+
+	got := sink.outcomes()
+	want := []ledger.Outcome{ledger.OutcomeIntent, ledger.OutcomeOK}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("audit stream = %v, want %v. Intent must be written BEFORE the tool "+
+			"runs and the outcome after, or an interrupted call is indistinguishable "+
+			"from one that never started", got, want)
+	}
+}
+
+// A tool that asked for an audit trail but NOT a blocking one gets the
+// ordinary degrade. Refusing here would give every audited tool fail_closed
+// semantics it did not ask for.
+func TestAnAuditedButNotFailClosedCallProceedsWhenTheSinkIsDown(t *testing.T) {
+	broken := &fakeSink{err: errors.New("the audit store is unreachable")}
+	c := coreWith(t, CoreConfig{Audit: broken})
+	def := audited(false)
+	if err := c.AddTools([]ToolDef{def}); err != nil {
+		t.Fatal(err)
+	}
+	var ran bool
+	resolver := func(context.Context, proto.Message) (proto.Message, error) {
+		ran = true
+		return auditProfile(), nil
+	}
+	if err := c.Register(def.FullMethod, func() proto.Message { return auditProfile() }, resolver); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.Invoke(context.Background(), auditPrincipal(), def.FullMethod, auditProfile()); err != nil {
+		t.Fatalf("a non-fail_closed call was refused because the sink was down: %v", err)
+	}
+	if !ran {
+		t.Error("the tool did not run; only fail_closed may stop a call")
+	}
+}
+
+// A REFUSED call on an audited tool still reaches the stream.
+//
+// "Someone tried to move money and was turned away" is exactly the row an
+// auditor goes looking for. It arrives as an outcome with no preceding
+// intent, which is how a refusal reads in this stream.
+func TestARefusedCallOnAnAuditedToolStillReachesTheStream(t *testing.T) {
+	sink := &fakeSink{}
+	c := coreWith(t, CoreConfig{Audit: sink})
+	def := audited(false)
+	if err := c.AddTools([]ToolDef{def}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := func(context.Context, proto.Message) (proto.Message, error) {
+		return auditProfile(), nil
+	}
+	if err := c.Register(def.FullMethod, func() proto.Message { return auditProfile() }, resolver); err != nil {
+		t.Fatal(err)
+	}
+
+	// Below the tool's clearance: refused at step 2, long before the resolver.
+	under := auditPrincipal()
+	under.Clearance = toolv1.Clearance_CLEARANCE_PUBLIC
+
+	if _, err := c.Invoke(context.Background(), under, def.FullMethod, auditProfile()); err == nil {
+		t.Fatal("an under-cleared caller reached an audited tool")
+	}
+
+	got := sink.outcomes()
+	if len(got) != 1 {
+		t.Fatalf("audit stream = %v, want exactly one row: a refusal writes an outcome "+
+			"and no intent, because the tool was never reached", got)
+	}
+	if got[0] == ledger.OutcomeIntent {
+		t.Error("the refusal was written as an intent; nothing was intended, the call " +
+			"was turned away")
+	}
+}
+
+// auditProfile is the fixture message. helpers_test.go's fullProfile lives in
+// the external test package; this file is internal, so it needs its own.
+func auditProfile() *testdata.Profile { return &testdata.Profile{Id: "p1"} }
+
+func auditPrincipal() *Principal {
+	return &Principal{
+		Subject:   "user:auditor",
+		Kind:      toolv1.PrincipalKind_PRINCIPAL_KIND_USER,
+		Clearance: toolv1.Clearance_CLEARANCE_RESTRICTED,
+		Verbs:     NewVerbSet(toolv1.Verb_VERB_READ),
 	}
 }

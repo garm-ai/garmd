@@ -37,6 +37,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	"github.com/garm-ai/garm/contracts/audit"
 	"github.com/garm-ai/garm/contracts/ledger"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/tool"
@@ -86,6 +87,14 @@ type Handler struct {
 	// because a call that happened and left no row is the failure this whole
 	// design is against.
 	Recorder ledger.Recorder
+
+	// Audit is the durable, separately-retained stream — the half of the
+	// record that may REFUSE a call, for a tool declaring fail_closed.
+	//
+	// Optional, and nil is safe precisely because the mount refusal reads it:
+	// a catalogue containing an audited tool will not mount without one, so
+	// nil can never mean "audited tool served unaudited".
+	Audit audit.Sink
 
 	// The chain for the current generation. See plane.go.
 	plane   atomic.Pointer[plane]

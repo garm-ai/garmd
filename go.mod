@@ -6,7 +6,7 @@ require (
 	buf.build/go/protovalidate v1.4.0
 	connectrpc.com/connect v1.21.0
 	github.com/bufbuild/protocompile v0.14.1
-	github.com/garm-ai/garm v0.6.0
+	github.com/garm-ai/garm v0.7.0
 	github.com/nats-io/nats-server/v2 v2.15.0 // test only: an embedded server for the transport tests. Not in `go list -deps`, so the CI boundary checks are unaffected.
 	github.com/nats-io/nats.go v1.54.0
 	github.com/spf13/cobra v1.10.2
