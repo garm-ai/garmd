@@ -5,6 +5,10 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/garm-ai/garm v0.0.0-20260924231809-6b6731bb981d h1:XzxHeDKLp6Zuo1V17aYBMwKMTdhcfNCp76e9QA0cMm8=
 github.com/garm-ai/garm v0.0.0-20260924231809-6b6731bb981d/go.mod h1:Vlb8Yuym87Zy4FBREZwmihlD9itTbr+2m/2kqYp8WoA=
+github.com/garm-ai/garm v0.2.1-0.20260925025928-9eac4e3d538f h1:XOT9Hq5R1URIsU7an5z6/NIa5ZJXtwGeZUBnvjs3XfQ=
+github.com/garm-ai/garm v0.2.1-0.20260925025928-9eac4e3d538f/go.mod h1:Vlb8Yuym87Zy4FBREZwmihlD9itTbr+2m/2kqYp8WoA=
+github.com/garm-ai/garm v0.3.0 h1:50+907q8o0SGt/IKlKOuEdjF4ksklkznCm0JEmT5MGc=
+github.com/garm-ai/garm v0.3.0/go.mod h1:Vlb8Yuym87Zy4FBREZwmihlD9itTbr+2m/2kqYp8WoA=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=

@@ -138,11 +138,16 @@ func (t *Transport) Services(ctx context.Context) ([]transport.Service, error) {
 				// every other service answered correctly.
 				continue
 			}
+			subjects := make([]string, 0, len(info.Endpoints))
+			for _, e := range info.Endpoints {
+				subjects = append(subjects, e.Subject)
+			}
 			out = append(out, transport.Service{
 				Name:     info.Name,
 				Instance: info.ID,
 				Version:  info.Version,
 				Identity: info.Metadata["garm.identity"],
+				Subjects: subjects,
 			})
 		}
 	}

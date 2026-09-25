@@ -80,6 +80,10 @@ type Service struct {
 	// One mechanism rather than two is what keeps garmd from acquiring
 	// knowledge of agents by the back door.
 	Identity string
+
+	// Subjects is what this instance answers on. Needed to work out which
+	// tools it claims to serve, which is what Identity gets compared for.
+	Subjects []string
 }
 
 // EventKind is what happened to a service.

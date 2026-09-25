@@ -14,6 +14,10 @@
   unmarshalled into a message built from a catalogue descriptor, routed over
   NATS, and the reply unmarshalled into another. No generated types anywhere.
 - `internal/transport/nats` — invocation, and discovery over `$SRV.INFO`.
+- Reconciliation. A service advertises its descriptor hash; the catalogue
+  records one per proto package; `garmd` compares them every 30s and refuses
+  to route on a mismatch. Silence is not agreement, and a failed sweep leaves
+  the previous verdict standing.
 
 ## Not built
 
@@ -21,14 +25,6 @@
 no authentication, no authorization, no input checking, no redaction, no
 ledger. `serve` says so at startup, and it means it — in front of anything
 real this is an ungoverned proxy wearing a governed one's name.
-
-**No reconciliation, and the gap is on the producer side.** A service
-advertises its descriptor hash on `$SRV.INFO`, and `garmd` reads it into
-`transport.Service.Identity` — but the catalogue carries no hash to compare it
-against, so nothing checks that a service implements the contract the
-catalogue declares. `garm catalogue build` needs to stamp the per-package hash
-using the generator's existing function; a second implementation of that hash
-would be worse than none.
 
 **No MCP surface, no catalogue service, no second listener.**
 

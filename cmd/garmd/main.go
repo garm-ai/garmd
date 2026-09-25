@@ -190,10 +190,20 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	defer nc.Close()
 
 	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
+	tp := garmnats.New(nc)
+
+	// Reconciliation is not optional in a deployment. Without it, a service
+	// built from a different contract answers anyway — protobuf ignores
+	// unknown fields and defaults absent ones — and the call is authorised,
+	// sanitised and ledgered as a success while reading fields as something
+	// else.
+	rec := &serve.Reconciler{Store: store, Discoverer: tp, Log: log}
+
 	h := &serve.Handler{
-		Store:   store,
-		Invoker: garmnats.New(nc),
-		Log:     log,
+		Store:      store,
+		Invoker:    tp,
+		Log:        log,
+		Reconciler: rec,
 	}
 
 	srv := &http.Server{
@@ -207,6 +217,7 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// the caller cannot determine.
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go rec.Run(ctx)
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)

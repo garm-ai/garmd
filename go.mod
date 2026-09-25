@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/bufbuild/protocompile v0.14.1
-	github.com/garm-ai/garm v0.0.0-20260924231809-6b6731bb981d
+	github.com/garm-ai/garm v0.3.0
 	github.com/nats-io/nats.go v1.54.0
 	github.com/spf13/cobra v1.10.2
 	google.golang.org/protobuf v1.36.12

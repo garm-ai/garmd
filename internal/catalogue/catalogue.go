@@ -56,7 +56,12 @@ type Catalogue struct {
 	Compartments []*toolv1.Decl
 	ToolSets     []*toolv1.Decl
 	FieldDocs    map[string]string
-	Provenance   *cataloguev1.Provenance
+
+	// DescriptorHashes is the wire shape each proto package declares, keyed
+	// by package. A service advertises the same digest; a mismatch means it
+	// implements a different contract from the one this catalogue governs.
+	DescriptorHashes map[string]string
+	Provenance       *cataloguev1.Provenance
 
 	// Bytes is the artifact's size.
 	//
@@ -118,16 +123,17 @@ func Load(body []byte, now func() time.Time) (*Catalogue, error) {
 	}
 
 	return &Catalogue{
-		Digest:        digest,
-		Bytes:         len(body),
-		SchemaVersion: msg.GetAnnotationSchemaVersion(),
-		Files:         files,
-		Defs:          defs,
-		Compartments:  msg.GetCompartments(),
-		ToolSets:      msg.GetToolSets(),
-		FieldDocs:     msg.GetFieldDocs(),
-		Provenance:    msg.GetProvenance(),
-		LoadedAt:      now(),
+		Digest:           digest,
+		Bytes:            len(body),
+		SchemaVersion:    msg.GetAnnotationSchemaVersion(),
+		Files:            files,
+		Defs:             defs,
+		Compartments:     msg.GetCompartments(),
+		ToolSets:         msg.GetToolSets(),
+		FieldDocs:        msg.GetFieldDocs(),
+		DescriptorHashes: msg.GetDescriptorHashes(),
+		Provenance:       msg.GetProvenance(),
+		LoadedAt:         now(),
 	}, nil
 }
 

@@ -32,10 +32,23 @@ import (
 
 // Handler serves the tool plane over HTTP, in Connect's unary shape:
 // POST /pkg.Service/Method, the message as the body.
+// Catalogues is the slice of the store these need: the generation to serve
+// this request with. Narrow on purpose — a handler that could reload, sweep
+// or inspect history would eventually do one of them mid-request.
+type Catalogues interface {
+	Current() *catalogue.Catalogue
+}
+
 type Handler struct {
-	Store   *catalogue.Store
+	Store   Catalogues
 	Invoker transport.Invoker
 	Log     *slog.Logger
+
+	// Reconciler refuses tools whose service implements a different contract
+	// from the catalogue. Optional only because a handler can be constructed
+	// without one in a test; a deployment without one routes to whatever
+	// answers, which is the failure that does not announce itself.
+	Reconciler *Reconciler
 }
 
 const (
@@ -69,6 +82,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "unimplemented",
 			fmt.Sprintf("no tool is served at %s", r.URL.Path))
 		return
+	}
+
+	// Checked before the request is even read. A call to a tool whose service
+	// implements a different contract must not happen, and must not look like
+	// it happened — so it is refused here rather than attempted and reported.
+	if h.Reconciler != nil {
+		if why, bad := h.Reconciler.Quarantined(pkgOfFQN(def.FQN)); bad {
+			if h.Log != nil {
+				h.Log.Error("refused: contract mismatch", "fqn", def.FQN, "reason", why)
+			}
+			writeErr(w, http.StatusServiceUnavailable, "unavailable",
+				fmt.Sprintf("%s is not being served: %s", def.FQN, why))
+			return
+		}
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
