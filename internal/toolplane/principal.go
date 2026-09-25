@@ -10,7 +10,7 @@ import (
 // unspecified verb can never satisfy a membership test.
 type VerbSet uint8
 
-func NewVerbSet(vs ...garmv1.Verb) VerbSet {
+func NewVerbSet(vs ...toolv1.Verb) VerbSet {
 	var out VerbSet
 	for _, v := range vs {
 		if v == toolv1.Verb_VERB_UNSPECIFIED {

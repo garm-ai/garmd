@@ -2,14 +2,24 @@ package toolplane
 
 import (
 	"fmt"
+	"maps"
 	"slices"
+	"strings"
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	"google.golang.org/protobuf/reflect/protoreflect"
+
 	"github.com/garm-ai/garmd/internal/tool"
 )
 
 // ToolDef is the declaration the chain reads, and it is an alias rather than
 // a type of its own.
+//
+// Being an alias, it carries no methods of its own — so what were methods on
+// the monorepo's struct are functions here. That is the honest shape anyway:
+// both ask enforcement questions ("can this build honour what this declares",
+// "do these two declarations agree") rather than describing the declaration,
+// and a declaration that could answer them would be deciding something.
 //
 // The chain talks about ToolDefs throughout, and so do a hundred and forty
 // nine commits of design record. An alias keeps that vocabulary while there
@@ -55,12 +65,12 @@ type AvailabilitySource interface {
 // exists to prevent, reintroduced. An allowlist refuses anything it doesn't
 // recognise by construction, including values that don't exist yet, so do
 // not "simplify" this back to enumerating what's unsupported.
-func (t ToolDef) unimplementedGovernance() error {
+func unimplementedGovernance(t ToolDef) error {
 	var missing []string
 	switch t.ApprovalMode {
-	case garmv1.Approval_MODE_UNSPECIFIED, garmv1.Approval_MODE_NONE, garmv1.Approval_MODE_NOTIFY:
+	case toolv1.Approval_MODE_UNSPECIFIED, toolv1.Approval_MODE_NONE, toolv1.Approval_MODE_NOTIFY:
 		// implemented (or absent) — fine.
-	case garmv1.Approval_MODE_GRANT:
+	case toolv1.Approval_MODE_GRANT:
 		missing = append(missing, "approval.mode MODE_GRANT (grant verification, spec §8)")
 	default:
 		missing = append(missing, fmt.Sprintf(
@@ -68,9 +78,9 @@ func (t ToolDef) unimplementedGovernance() error {
 				"enforce, spec §8)", t.ApprovalMode))
 	}
 	switch t.AuditLevel {
-	case garmv1.Audit_LEVEL_UNSPECIFIED, garmv1.Audit_LEVEL_LEDGER:
+	case toolv1.Audit_LEVEL_UNSPECIFIED, toolv1.Audit_LEVEL_LEDGER:
 		// implemented (or absent) — fine.
-	case garmv1.Audit_LEVEL_AUDIT:
+	case toolv1.Audit_LEVEL_AUDIT:
 		missing = append(missing, "audit.level LEVEL_AUDIT (the audit stream, spec §10)")
 	default:
 		missing = append(missing, fmt.Sprintf(
@@ -109,7 +119,7 @@ func (t ToolDef) unimplementedGovernance() error {
 // the same message type (a dynamic one built from a descriptor set and the
 // generated one, say) declare the same tool, and refusing that pair would be
 // this check inventing a conflict that does not exist.
-func (t ToolDef) sameDeclarationAs(o ToolDef) bool {
+func sameDeclarationAs(t, o ToolDef) bool {
 	md := func(d protoreflect.MessageDescriptor) protoreflect.FullName {
 		if d == nil {
 			return ""

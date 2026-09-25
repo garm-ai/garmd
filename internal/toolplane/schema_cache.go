@@ -96,9 +96,3 @@ func (c *Core) SchemaFor(t ToolDef, p *Principal) (in, out Schema, err error) {
 	)
 	return in, out, nil
 }
-
-// SchemaFor delegates to the Core, so a surface holding a *Server projects
-// through exactly the same cache as one holding a *Core.
-func (s *Server) SchemaFor(t ToolDef, p *Principal) (in, out Schema, err error) {
-	return s.core.SchemaFor(t, p)
-}

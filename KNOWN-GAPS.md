@@ -19,12 +19,22 @@
   to route on a mismatch. Silence is not agreement, and a failed sweep leaves
   the previous verdict standing.
 
+- `internal/toolplane` — the chain. Ported, compiling, **not yet wired into
+  `serve`**, so a request still bypasses it.
+- `internal/ledger` — the recorders. The Event's shape is in the contract,
+  because a tool call and a generation call must produce one record type.
+
 ## Not built
 
-**No chain. This routes; it does not govern.** None of the ten steps exist:
-no authentication, no authorization, no input checking, no redaction, no
-ledger. `serve` says so at startup, and it means it — in front of anything
-real this is an ungoverned proxy wearing a governed one's name.
+**The chain is not wired in.** `internal/toolplane.Core` exists and compiles,
+with steps 2, 3, 8 and 9 implemented and 1, 4, 5, 7, 10 stubbed as the
+monorepo left them. But `serve` still calls the transport directly, so no
+request passes through it. Until it does, this routes and does not govern,
+and the startup warning means exactly what it says.
+
+**Step 1 has no implementation.** `garmauth` — JWT, JWKS, the act chain — is
+still in the monorepo, so there is no way to build a real `Principal`. That is
+the next port, and it is what unblocks wiring the rest.
 
 **No MCP surface, no catalogue service, no second listener.**
 

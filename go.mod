@@ -3,8 +3,10 @@ module github.com/garm-ai/garmd
 go 1.26.0
 
 require (
+	buf.build/go/protovalidate v1.4.0
+	connectrpc.com/connect v1.21.0
 	github.com/bufbuild/protocompile v0.14.1
-	github.com/garm-ai/garm v0.5.0
+	github.com/garm-ai/garm v0.6.0
 	github.com/nats-io/nats.go v1.54.0
 	github.com/spf13/cobra v1.10.2
 	google.golang.org/protobuf v1.36.12
@@ -12,10 +14,8 @@ require (
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.12-20260825204119-511051f7f437.1 // indirect
-	buf.build/go/protovalidate v1.4.0 // indirect
 	cel.dev/cel-go v0.32.0 // indirect
 	cel.dev/expr v0.25.3 // indirect
-	connectrpc.com/connect v1.21.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect

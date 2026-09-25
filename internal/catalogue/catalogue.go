@@ -114,6 +114,11 @@ func Load(body []byte, now func() time.Time) (*Catalogue, error) {
 	}
 
 	defs := buildDefs(files)
+	// Every Def points at the same map. Shared and read-only: see
+	// tool.Def.FieldDocs.
+	for i := range defs {
+		defs[i].FieldDocs = msg.GetFieldDocs()
+	}
 	if err := assignClientNames(defs); err != nil {
 		return nil, fmt.Errorf("catalogue %s: %w", digest, err)
 	}

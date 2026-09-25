@@ -72,6 +72,19 @@ type Def struct {
 	// agent error.
 	WhenNotToUse string
 	OnError      string
+
+	// FieldDocs is the prose for this tool's fields, keyed by each field's
+	// full proto name.
+	//
+	// It is here rather than read from the catalogue on demand because a
+	// projected schema is assembled per principal and per shape, and going
+	// back to the catalogue for every field would make the cache pointless.
+	//
+	// The map is SHARED with the catalogue that produced it and with every
+	// other Def from that catalogue — read-only, never written after load.
+	// Copying it per tool would multiply the one part of a catalogue that is
+	// already the largest.
+	FieldDocs map[string]string
 }
 
 // Service is the proto service this tool belongs to, which is also the queue

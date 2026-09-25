@@ -52,7 +52,16 @@ type Core struct {
 	// unrelated descriptors share a compiled plan; protoreflect.MessageDescriptor
 	// is an interface backed by a pointer for every real implementation, so
 	// it is safe and cheap to use as a map key directly.
-	plans     map[protoreflect.MessageDescriptor]*policy.Plan
+	plans map[protoreflect.MessageDescriptor]*policy.Plan
+
+	// need is the compartment set each tool resolves to, keyed by route.
+	//
+	// Derived at mount, never declared — the registry turns declared
+	// compartment NAMES into a bitset, and which bit a name gets depends on
+	// the whole catalogue. It lives here rather than on ToolDef because a
+	// declaration should carry only what its author wrote: a field mixing
+	// the two invites code to trust a value nobody declared.
+	need      map[string]policy.CompartmentSet
 	tools     map[string]ToolDef      // keyed by FullMethod
 	resolvers map[string]registration // keyed by procedure; see resolver.go
 
@@ -156,6 +165,7 @@ func NewCore(cfg CoreConfig) (*Core, error) {
 		grants:    cfg.Grants,
 		notifier:  cfg.Notifier,
 		plans:     map[protoreflect.MessageDescriptor]*policy.Plan{},
+		need:      map[string]policy.CompartmentSet{},
 		tools:     map[string]ToolDef{},
 		resolvers: map[string]registration{},
 	}, nil
@@ -201,13 +211,13 @@ func (c *Core) AddTools(tools []ToolDef) error {
 
 	for i := range tools {
 		t := tools[i]
-		if err := t.unimplementedGovernance(); err != nil {
+		if err := unimplementedGovernance(t); err != nil {
 			return err
 		}
 		// Before any work: a conflicting declaration is a wiring bug, and
 		// the diagnostic is clearer than whatever a compartment or plan
 		// failure downstream would say about it.
-		if prev, dup := c.tools[t.FullMethod]; dup && !prev.sameDeclarationAs(t) {
+		if prev, dup := c.tools[t.FullMethod]; dup && !sameDeclarationAs(prev, t) {
 			return fmt.Errorf("tool %q: %s is already declared as %q, with a "+
 				"different declaration; refusing to replace it. One method has "+
 				"one policy — declaring it twice differently means two wirings "+
@@ -231,7 +241,7 @@ func (c *Core) AddTools(tools []ToolDef) error {
 		if err != nil {
 			return fmt.Errorf("tool %q: %w", t.Name, err)
 		}
-		t.need = need
+		c.need[t.FullMethod] = need
 		c.tools[t.FullMethod] = t
 	}
 	return nil
@@ -319,7 +329,7 @@ func (c *Core) visibleLocked(p *Principal, t ToolDef) bool {
 	}
 	return p.Verbs.Has(t.Verb) &&
 		policy.Allows(p.Clearance, t.MinClearance) &&
-		p.Compartments.Covers(t.need) &&
+		p.Compartments.Covers(c.need[t.FullMethod]) &&
 		inScope(p.ToolSets, t.Sets)
 }
 
@@ -480,7 +490,7 @@ func (c *Core) invoke(
 				"tool %q invisible to principal: verb_ok=%v clearance_ok=%v compartments_ok=%v",
 				tool.Name, p.Verbs.Has(tool.Verb),
 				policy.Allows(p.Clearance, tool.MinClearance),
-				p.Compartments.Covers(tool.need))
+				p.Compartments.Covers(c.need[tool.FullMethod]))
 			return nil, errNotFound
 		}
 	}
