@@ -57,46 +57,78 @@ type AvailabilitySource interface {
 // "the tool runs with none of the supervision it claims". The first is a
 // bad afternoon, the second is the incident.
 //
-// This is deliberately an allowlist of the values this build implements,
-// not a denylist of the ones it doesn't. A denylist only refuses the values
-// it was written against; the enums it's checking are closed today, but the
-// moment either one gains a new member (MODE_MFA, LEVEL_FORENSIC, ...), a
-// denylist mounts it silently ungated — the exact failure this function
-// exists to prevent, reintroduced. An allowlist refuses anything it doesn't
-// recognise by construction, including values that don't exist yet, so do
-// not "simplify" this back to enumerating what's unsupported.
-func unimplementedGovernance(t ToolDef) error {
+// This is deliberately an allowlist of the values this Core can honour, not
+// a denylist of the ones it cannot. A denylist only refuses the values it was
+// written against; the enums it checks are closed today, but the moment
+// either gains a new member (MODE_MFA, LEVEL_FORENSIC, ...) a denylist mounts
+// it silently ungated — the exact failure this exists to prevent,
+// reintroduced. An allowlist refuses anything it does not recognise by
+// construction, including values that do not exist yet, so do not "simplify"
+// this back to enumerating what is unsupported.
+//
+// It asks what THIS Core was given, not what this build contains. Grants, FGA
+// and notify are CoreConfig fields precisely so a deployment can supply them,
+// and a check phrased as "the build does not implement grants" would refuse a
+// MODE_GRANT tool even on a Core that had just been handed a GrantVerifier —
+// making those fields unreachable, and this refusal permanent rather than
+// conditional.
+func (c *Core) unimplementedGovernance(t ToolDef) error {
 	var missing []string
+
 	switch t.ApprovalMode {
-	case toolv1.Approval_MODE_UNSPECIFIED, toolv1.Approval_MODE_NONE, toolv1.Approval_MODE_NOTIFY:
-		// implemented (or absent) — fine.
+	case toolv1.Approval_MODE_UNSPECIFIED, toolv1.Approval_MODE_NONE:
+		// Nothing declared. Nothing to honour.
+	case toolv1.Approval_MODE_NOTIFY:
+		// Step 10 DEGRADES — a notifier that fails cannot fail the call — but
+		// degrading is not the same as absent. With no notifier at all the
+		// notification never happens for any call, which makes the
+		// declaration false rather than best-effort.
+		if c.notifier == nil {
+			missing = append(missing, "approval.mode MODE_NOTIFY, and this deployment "+
+				"has no Notifier (step 10)")
+		}
 	case toolv1.Approval_MODE_GRANT:
-		missing = append(missing, "approval.mode MODE_GRANT (grant verification, spec §8)")
+		if c.grants == nil {
+			missing = append(missing, "approval.mode MODE_GRANT, and this deployment "+
+				"has no GrantVerifier (step 5)")
+		}
 	default:
 		missing = append(missing, fmt.Sprintf(
-			"approval.mode %d (unrecognised — not one of the modes this build knows how to "+
-				"enforce, spec §8)", t.ApprovalMode))
+			"approval.mode %d, which is not a mode this build knows how to enforce "+
+				"(step 5)", t.ApprovalMode))
 	}
+
 	switch t.AuditLevel {
 	case toolv1.Audit_LEVEL_UNSPECIFIED, toolv1.Audit_LEVEL_LEDGER:
-		// implemented (or absent) — fine.
+		// NewCore refuses to build without a Recorder, so the ledger is
+		// always there.
 	case toolv1.Audit_LEVEL_AUDIT:
-		missing = append(missing, "audit.level LEVEL_AUDIT (the audit stream, spec §10)")
+		// Deliberately unconditional, unlike the three above. LEVEL_AUDIT
+		// asks for a durable, separately retained audit stream, and there is
+		// no CoreConfig field to supply one because nothing in this
+		// repository implements it yet. When the sink lands this becomes a
+		// nil check like the others; until then a tool asking for seven years
+		// of retention must not mount against a Recorder that writes to
+		// stdout.
+		missing = append(missing, "audit.level LEVEL_AUDIT, and no audit stream exists "+
+			"yet — the ledger is not one (step 9 vs step 10)")
 	default:
 		missing = append(missing, fmt.Sprintf(
-			"audit.level %d (unrecognised — not one of the levels this build knows how to "+
-				"emit, spec §10)", t.AuditLevel))
+			"audit.level %d, which is not a level this build knows how to emit", t.AuditLevel))
 	}
-	if t.HasAuthorization {
-		missing = append(missing, "an authorization block (instance authorization, spec §7)")
+
+	if t.HasAuthorization && c.fga == nil {
+		missing = append(missing, "an authorization block, and this deployment has no "+
+			"FGAChecker (steps 4 and 7)")
 	}
+
 	if len(missing) == 0 {
 		return nil
 	}
-	return fmt.Errorf("tool %q declares %s, which this build does not implement — "+
-		"Plan C adds grants, the audit stream and FGA. Serving it now would run the "+
-		"tool ungated while its schema says it is supervised; remove the declaration "+
-		"or do not mount this tool until Plan C lands",
+	return fmt.Errorf("tool %q declares %s. Serving it would run the tool ungated while "+
+		"its schema says it is supervised, so this catalogue will not mount: either "+
+		"configure the missing step, or remove the declaration from the tool that is "+
+		"not getting it. See KNOWN-GAPS.md",
 		t.Name, strings.Join(missing, ", "))
 }
 

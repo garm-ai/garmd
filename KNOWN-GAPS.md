@@ -34,15 +34,27 @@ come out of the artifact. Reload replaces the pair or neither.
 
 ## Not built
 
-**Steps 4, 5, 7 and 10 are stubs.** Instance authorization (pre and post),
-grant verification and notify are nil, and the chain treats a nil step as "not
-declared". A tool annotated `approval: { mode: MODE_GRANT }` therefore mounts
-and serves as though it had asked for nothing.
+**Steps 4, 5, 7 and 10 have no implementation here, and a tool that declares
+them will not mount.** Instance authorization, grant verification and notify
+are `CoreConfig` seams, and `AddTools` refuses any tool declaring supervision
+the Core has not been given: a MODE_GRANT tool with no `GrantVerifier`, an
+authorization block with no `FGAChecker`, a MODE_NOTIFY tool with no
+`Notifier`. `serve.Prepare` runs that at startup, so the refusal stops the
+process rather than arriving one 503 at a time after a green deploy.
 
-That is the most dangerous gap in this repository, because the annotation
-reads as protection in review. The monorepo refused to mount such a tool at
-all; that refusal has not been ported, and until it is, an irreversible tool
-can be served ungated.
+The refusal reads what THIS Core was configured with, not what the build
+contains, so supplying a verifier makes the same tool mount. It is an
+allowlist: an enum member that does not exist yet refuses by construction
+rather than falling through.
+
+Nothing in this repository currently supplies any of the three. So in
+practice a catalogue containing an approval-gated tool cannot be served at
+all — which is the intended failure, and the reason it is safe that the steps
+are unimplemented.
+
+`audit.level LEVEL_AUDIT` is the exception: it refuses unconditionally,
+because there is no seam to supply an audit stream. That becomes a nil check
+like the others when the sink lands.
 
 **The ledger is not durable.** `--catalogue` deployments record through
 `record.Slog`, so step 9 is a line on stdout. A tool declaring

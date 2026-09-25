@@ -61,6 +61,20 @@ func (h *Handler) planeFor(cat *catalogue.Catalogue) (*plane, error) {
 	return p, nil
 }
 
+// Prepare builds the chain for a generation up front, so a catalogue this
+// deployment cannot govern is a startup failure.
+//
+// Without it the lazy build turns that refusal into a process that binds
+// cleanly and answers 503 to everything — which reads as healthy to an
+// orchestrator, rolls out across every replica, and is discovered by a
+// caller. A tool declaring supervision nobody will apply is exactly what
+// AddTools refuses, and the refusal is worth nothing if it arrives one
+// request at a time after the deploy is green.
+func (h *Handler) Prepare(cat *catalogue.Catalogue) error {
+	_, err := h.planeFor(cat)
+	return err
+}
+
 func (h *Handler) newPlane(cat *catalogue.Catalogue) (*plane, error) {
 	core, err := toolplane.NewCore(toolplane.CoreConfig{
 		HashKey: h.HashKey,

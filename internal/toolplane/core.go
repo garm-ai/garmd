@@ -103,10 +103,13 @@ type FGAChecker interface {
 }
 
 // GrantVerifier is step 5: an approval-gated tool verifies a grant token
-// before it runs. Nil on a Core means no verifier is configured — which is
-// safe only because mount REFUSES to serve a MODE_GRANT tool at all (see
-// ToolDef.unimplementedGovernance). If that refusal is ever relaxed, this
-// seam must become mandatory for those tools in the same change.
+// before it runs.
+//
+// Nil on a Core means no verifier is configured, which is safe only because
+// AddTools then REFUSES to mount a MODE_GRANT tool at all — see
+// Core.unimplementedGovernance, which reads this field to decide. The two are
+// a pair: relaxing that refusal without making this seam mandatory for those
+// tools would serve an approval-gated tool with no approval.
 type GrantVerifier interface {
 	Verify(ctx context.Context, p *Principal, t ToolDef) error
 }
@@ -212,7 +215,7 @@ func (c *Core) AddTools(tools []ToolDef) error {
 
 	for i := range tools {
 		t := tools[i]
-		if err := unimplementedGovernance(t); err != nil {
+		if err := c.unimplementedGovernance(t); err != nil {
 			return err
 		}
 		// Before any work: a conflicting declaration is a wiring bug, and

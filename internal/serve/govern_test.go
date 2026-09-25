@@ -200,3 +200,37 @@ func TestEveryOutcomeIsLedgered(t *testing.T) {
 		})
 	}
 }
+
+// A catalogue this deployment cannot govern must be refused BEFORE the
+// listener binds, not one request at a time afterwards.
+//
+// The distinction is the whole value of the mount refusal. A process that
+// binds and then answers 503 to everything reads as healthy to an
+// orchestrator: it rolls out across every replica and is discovered by a
+// caller. Prepare is what makes it a startup failure instead.
+func TestACatalogueThisDeploymentCannotGovernIsRefusedUpFront(t *testing.T) {
+	cat := aCatalogue()
+	// The declaration nobody here can honour: an approval gate with no
+	// verifier configured.
+	cat.Defs[0].ApprovalMode = toolv1.Approval_MODE_GRANT
+
+	h := chained(&Handler{Store: &countingStore{c: cat}, Invoker: &fakeInvoker{}})
+
+	err := h.Prepare(cat)
+	if err == nil {
+		t.Fatal("a tool declaring MODE_GRANT was accepted with no GrantVerifier; it " +
+			"would be served with none of the approval its schema promises")
+	}
+	if !strings.Contains(err.Error(), "GrantVerifier") {
+		t.Errorf("the refusal does not say what is missing: %v", err)
+	}
+}
+
+// The same catalogue, with the step configured, prepares cleanly — so the
+// refusal is about this deployment's capability and not a permanent ban.
+func TestACatalogueWhoseStepsAreConfiguredPreparesCleanly(t *testing.T) {
+	h := chained(&Handler{Store: &countingStore{c: aCatalogue()}, Invoker: &fakeInvoker{}})
+	if err := h.Prepare(aCatalogue()); err != nil {
+		t.Fatalf("an ordinary catalogue would not prepare: %v", err)
+	}
+}

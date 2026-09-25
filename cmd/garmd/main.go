@@ -285,6 +285,14 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 		Recorder: record.NewSlog(log),
 	}
 
+	// Before the listener. A catalogue declaring supervision this deployment
+	// cannot apply must stop the process, not each request: the schema author
+	// was forced into the declaration, so the only outcomes left are a
+	// refusal here and a tool running with none of the supervision it claims.
+	if err := h.Prepare(cat); err != nil {
+		return fmt.Errorf("this catalogue cannot be served: %w", err)
+	}
+
 	srv := &http.Server{
 		Addr: o.listen,
 		// The middleware only LIFTS the bearer token into the context; it
