@@ -19,9 +19,9 @@
   to route on a mismatch. Silence is not agreement, and a failed sweep leaves
   the previous verdict standing.
 
-- `internal/toolplane` — the chain. Ported, compiling, **not yet wired into
-  `serve`**, so a request still bypasses it.
-- `internal/ledger` — the recorders. The Event's shape is in the contract,
+- `internal/toolplane` — the chain, at 48% coverage from the monorepo's own
+  tests. **Not yet wired into `serve`**, so a request still bypasses it.
+- `internal/record` — where an event goes. Its SHAPE is in the contract,
   because a tool call and a generation call must produce one record type.
 
 ## Not built
@@ -31,6 +31,17 @@ with steps 2, 3, 8 and 9 implemented and 1, 4, 5, 7, 10 stubbed as the
 monorepo left them. But `serve` still calls the transport directly, so no
 request passes through it. Until it does, this routes and does not govern,
 and the startup warning means exactly what it says.
+
+**Coverage is uneven and the gaps are named.** The chain is at 48% and the
+catalogue at 81%; `serve` is at 38% (the reconciler is covered, the handler is
+not) and `transport/nats`, `record`, `tool` and `cmd/garmd` are at zero.
+
+Three test files did NOT come across from the monorepo, each for a reason
+rather than by omission: `mount_test.go` exercises the generated-registry
+mount path that the catalogue replaces, `core_invocation_context_test.go`
+drives the NATS resolver directly, and the server-level tests
+(`interceptor`, `server`, `catalog`) target an HTTP server that `serve`
+replaced. What they covered still needs covering, against the new shapes.
 
 **Step 1 has no implementation.** `garmauth` — JWT, JWKS, the act chain — is
 still in the monorepo, so there is no way to build a real `Principal`. That is

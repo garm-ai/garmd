@@ -1,7 +1,6 @@
 package toolplane
 
 import (
-	"buf.build/go/protovalidate"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,6 +9,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"buf.build/go/protovalidate"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"

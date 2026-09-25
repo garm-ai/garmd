@@ -1,4 +1,4 @@
-package ledger
+package record
 
 import (
 	"context"
@@ -7,18 +7,18 @@ import (
 )
 
 // MemoryRecorder is for tests (spec §7 "memory (tests)").
-type MemoryRecorder struct {
+type Memory struct {
 	mu     sync.Mutex
 	events []ledger.Event
 }
 
-func (m *MemoryRecorder) Record(_ context.Context, ev ledger.Event) {
+func (m *Memory) Record(_ context.Context, ev ledger.Event) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.events = append(m.events, ev)
 }
 
-func (m *MemoryRecorder) Events() []ledger.Event {
+func (m *Memory) Events() []ledger.Event {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]ledger.Event(nil), m.events...)

@@ -1,4 +1,4 @@
-package ledger
+package record
 
 import (
 	"context"
@@ -8,13 +8,13 @@ import (
 
 // SlogRecorder is the degraded mode of spec §3/§7: without DATABASE_URL,
 // usage events land as structured logs flagged unledgered=true.
-type SlogRecorder struct {
+type Slog struct {
 	l *slog.Logger
 }
 
-func NewSlogRecorder(l *slog.Logger) *SlogRecorder { return &SlogRecorder{l: l} }
+func NewSlog(l *slog.Logger) *Slog { return &Slog{l: l} }
 
-func (r *SlogRecorder) Record(ctx context.Context, ev ledger.Event) {
+func (r *Slog) Record(ctx context.Context, ev ledger.Event) {
 	violations := ev.PolicyViolations
 	if violations == nil {
 		violations = []string{} // JSON [] not null — the e2e asserts == []
