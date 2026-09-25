@@ -58,8 +58,22 @@ type Def struct {
 	// Governance the tool DECLARES. Carried so that mounting can REFUSE: a
 	// declaration the runtime silently ignores is worse than no declaration,
 	// because it reads as protection in review.
-	ApprovalMode     toolv1.Approval_Mode
-	AuditLevel       toolv1.Audit_Level
+	ApprovalMode toolv1.Approval_Mode
+	AuditLevel   toolv1.Audit_Level
+
+	// The rest of the audit block, carried because a declaration the runtime
+	// silently drops is worse than no declaration.
+	//
+	// Only Level used to reach here, so `audit: { level: LEVEL_LEDGER,
+	// fail_closed: true, retain_days: 2555 }` mounted cleanly and honoured
+	// none of it — a tool could ask for a blocking, seven-year audit trail
+	// and be served against a recorder that writes to stdout, simply by not
+	// saying LEVEL_AUDIT. These are here so the mount refusal can see them.
+	AuditRecordRequest  bool
+	AuditRecordResponse bool
+	AuditRetainDays     uint32
+	AuditFailClosed     bool
+
 	HasAuthorization bool
 
 	Idempotent    bool

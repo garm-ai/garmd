@@ -47,6 +47,7 @@ func TestSameDeclarationAsComparesEveryDeclaredField(t *testing.T) {
 		reflect.TypeOf(toolv1.Clearance(0)):     toolv1.Clearance_CLEARANCE_RESTRICTED,
 		reflect.TypeOf(toolv1.Approval_Mode(0)): toolv1.Approval_MODE_GRANT,
 		reflect.TypeOf(toolv1.Audit_Level(0)):   toolv1.Audit_Level(2),
+		reflect.TypeOf(uint32(0)):               uint32(2555),
 		reflect.TypeOf(toolv1.Reversibility(0)): toolv1.Reversibility_REVERSIBILITY_NONE,
 		reflect.TypeOf((*protoreflect.MessageDescriptor)(nil)).Elem(): protoreflect.MessageDescriptor(
 			(&timestamppb.Timestamp{}).ProtoReflect().Descriptor()),

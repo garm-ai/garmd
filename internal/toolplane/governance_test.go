@@ -219,3 +219,77 @@ func TestTheRefusalNamesEveryMissingStepAtOnce(t *testing.T) {
 		}
 	}
 }
+
+// The whole audit block is checked, not just its level.
+//
+// This is the hole the level-only check left. `audit` has five fields and
+// only `level` reached the runtime, so a tool could ask for a blocking,
+// seven-year, payload-recording audit trail and mount cleanly against a
+// recorder that writes to stdout — simply by saying LEVEL_LEDGER instead of
+// LEVEL_AUDIT. The declaration read as protection and bought nothing, which
+// is precisely the failure this refusal exists to prevent.
+func TestTheWholeAuditBlockIsCheckedNotJustItsLevel(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		def     ToolDef
+		wantsay string
+	}{
+		{
+			"a blocking audit at the ordinary level",
+			declaring(func(d *ToolDef) {
+				d.AuditLevel = toolv1.Audit_LEVEL_LEDGER
+				d.AuditFailClosed = true
+			}),
+			"fail_closed",
+		},
+		{
+			"seven years of retention nobody provides",
+			declaring(func(d *ToolDef) {
+				d.AuditLevel = toolv1.Audit_LEVEL_LEDGER
+				d.AuditRetainDays = 2555
+			}),
+			"retain_days",
+		},
+		{
+			"recording a payload the Event cannot hold",
+			declaring(func(d *ToolDef) {
+				d.AuditLevel = toolv1.Audit_LEVEL_LEDGER
+				d.AuditRecordRequest = true
+			}),
+			"record_request",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := coreWith(t, CoreConfig{
+				Grants: stubGrants{}, FGA: stubFGA{}, Notifier: stubNotifier{},
+			})
+			err := c.AddTools([]ToolDef{tc.def})
+			if err == nil {
+				t.Fatalf("mounted; the tool asks for an audit guarantee nothing here " +
+					"provides, and LEVEL_LEDGER must not be a way around the refusal")
+			}
+			if !strings.Contains(err.Error(), tc.wantsay) {
+				t.Errorf("the refusal does not name %q: %v", tc.wantsay, err)
+			}
+		})
+	}
+}
+
+// fail_closed cannot be satisfied by ANY Recorder, not merely by the ones
+// written so far.
+//
+// The interface says Record "must not fail the call" and the annotation says
+// the call must not proceed unless it was recorded. Those contradict, so this
+// refusal cannot be lifted by writing a better sink — it needs a contract
+// change. If someone lifts it anyway, this is what fails.
+func TestFailClosedIsRefusedEvenWithEveryStepConfigured(t *testing.T) {
+	c := coreWith(t, CoreConfig{
+		Grants: stubGrants{}, FGA: stubFGA{}, Notifier: stubNotifier{},
+	})
+	def := declaring(func(d *ToolDef) { d.AuditFailClosed = true })
+
+	if err := c.AddTools([]ToolDef{def}); err == nil {
+		t.Fatal("a fail_closed tool mounted with every configurable step supplied; " +
+			"the ledger contract still cannot refuse a call, so the guarantee is false")
+	}
+}

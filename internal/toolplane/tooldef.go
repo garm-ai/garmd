@@ -117,6 +117,30 @@ func (c *Core) unimplementedGovernance(t ToolDef) error {
 			"audit.level %d, which is not a level this build knows how to emit", t.AuditLevel))
 	}
 
+	// The rest of the audit block. Every one of these is a promise about
+	// WHERE the record goes and HOW LONG it survives, and the Recorder
+	// contract cannot express any of them: Record takes no payload, returns
+	// no error, and says nothing about retention.
+	//
+	// fail_closed is the sharp one. It says the call must not proceed unless
+	// it was recorded, and `Recorder.Record` is documented as "must not fail
+	// the call" — a direct contradiction, so it cannot be honoured by any
+	// implementation of the current interface rather than merely by the ones
+	// written so far. Refusing is the only honest answer until the contract
+	// grows a recorder that can refuse.
+	if t.AuditFailClosed {
+		missing = append(missing, "audit.fail_closed, which no Recorder can honour — "+
+			"Record cannot fail a call by contract (step 9)")
+	}
+	if t.AuditRetainDays > 0 {
+		missing = append(missing, fmt.Sprintf(
+			"audit.retain_days %d, and nothing here retains anything", t.AuditRetainDays))
+	}
+	if t.AuditRecordRequest || t.AuditRecordResponse {
+		missing = append(missing, "audit.record_request/record_response, and a ledger "+
+			"Event carries no payload to put them in")
+	}
+
 	if t.HasAuthorization && c.fga == nil {
 		missing = append(missing, "an authorization block, and this deployment has no "+
 			"FGAChecker (steps 4 and 7)")
@@ -171,6 +195,10 @@ func sameDeclarationAs(t, o ToolDef) bool {
 		md(t.Output) == md(o.Output) &&
 		t.ApprovalMode == o.ApprovalMode &&
 		t.AuditLevel == o.AuditLevel &&
+		t.AuditRecordRequest == o.AuditRecordRequest &&
+		t.AuditRecordResponse == o.AuditRecordResponse &&
+		t.AuditRetainDays == o.AuditRetainDays &&
+		t.AuditFailClosed == o.AuditFailClosed &&
 		t.HasAuthorization == o.HasAuthorization &&
 		t.Idempotent == o.Idempotent &&
 		t.Reversibility == o.Reversibility &&

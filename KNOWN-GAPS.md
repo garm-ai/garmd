@@ -52,9 +52,34 @@ practice a catalogue containing an approval-gated tool cannot be served at
 all — which is the intended failure, and the reason it is safe that the steps
 are unimplemented.
 
-`audit.level LEVEL_AUDIT` is the exception: it refuses unconditionally,
-because there is no seam to supply an audit stream. That becomes a nil check
-like the others when the sink lands.
+The audit block refuses unconditionally, all five fields of it. There is no
+seam to supply an audit stream, nothing retains anything, and a ledger `Event`
+carries no payload — so `LEVEL_AUDIT`, `retain_days`, `record_request` and
+`record_response` each refuse. Four of those five used to be dropped by the
+catalogue loader, which took `GetLevel()` and nothing else: a tool could ask
+for a blocking, seven-year, payload-recording trail and mount cleanly against
+a recorder writing to stdout, just by saying `LEVEL_LEDGER`.
+
+## `audit.fail_closed` needs a contract change, not a sink
+
+`fail_closed` says the call must not proceed unless it was recorded.
+`ledger.Recorder` says:
+
+```go
+// Record must not fail the call: implementations swallow their own
+// errors (logging them) and must be safe under a cancelled ctx.
+Record(ctx context.Context, ev Event)
+```
+
+No return value, and an explicit instruction not to fail the call. The two
+contradict, so `fail_closed` cannot be honoured by ANY implementation of the
+current interface — writing a durable sink behind it would not help. It needs
+a second method, or a second interface, that is allowed to refuse.
+
+That is a `garm/contracts` decision affecting both planes, not a garmd one,
+and it is the thing to settle before building the sink: a sink built against
+today's `Recorder` would be durable and still unable to keep the one promise
+that matters most.
 
 **The ledger is not durable.** `--catalogue` deployments record through
 `record.Slog`, so step 9 is a line on stdout. A tool declaring

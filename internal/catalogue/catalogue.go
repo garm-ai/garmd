@@ -238,8 +238,14 @@ func defFor(fd protoreflect.FileDescriptor, svc protoreflect.ServiceDescriptor,
 		Input:        m.Input(),
 		Output:       m.Output(),
 
-		ApprovalMode:     p.GetApproval().GetMode(),
-		AuditLevel:       p.GetAudit().GetLevel(),
+		ApprovalMode: p.GetApproval().GetMode(),
+
+		AuditLevel:          p.GetAudit().GetLevel(),
+		AuditRecordRequest:  p.GetAudit().GetRecordRequest(),
+		AuditRecordResponse: p.GetAudit().GetRecordResponse(),
+		AuditRetainDays:     p.GetAudit().GetRetainDays(),
+		AuditFailClosed:     p.GetAudit().GetFailClosed(),
+
 		HasAuthorization: p.GetAuthorization() != nil,
 
 		Idempotent:    p.GetEffects().GetIdempotent(),
