@@ -2,9 +2,15 @@ package serve
 
 import (
 	"context"
+	"sync"
+
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/bufbuild/protocompile"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,14 +19,16 @@ import (
 	"sync/atomic"
 	"testing"
 
-	cataloguev1 "github.com/garm-ai/garm/contracts/garm/catalogue/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"github.com/garm-ai/garmd/internal/catalogue"
+	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/tool"
+	"github.com/garm-ai/garmd/internal/toolplane"
 	"github.com/garm-ai/garmd/internal/transport"
 )
 
@@ -43,8 +51,106 @@ const (
 // linked message with a scalar field would do: the handler never sees a
 // generated type, only a descriptor it builds a dynamicpb message from, and
 // this test takes the same route.
+// message is the fixture tool's request and response shape.
+//
+// It is COMPILED here rather than borrowed from a linked type, and that is
+// not incidental. The chain compiles a redaction plan for every message it
+// mounts and refuses a field with no policy and no message default (L1), so
+// an unannotated descriptor — garm's own Provenance, say — cannot be mounted
+// at all. Borrowing one made these tests pass while the chain was bypassed;
+// it stops working the moment the chain is in the path, which is the point.
+//
+// The field is named `producer` so the rest of this file reads unchanged.
 func message() protoreflect.MessageDescriptor {
-	return (&cataloguev1.Provenance{}).ProtoReflect().Descriptor()
+	fixtureOnce.Do(func() {
+		const src = `syntax = "proto3";
+package srv.v1;
+import "garm/tool/v1/tool.proto";
+option go_package = "example.com/gen/srv_v1;x";
+message M {
+  option (garm.tool.v1.default_field_policy) = { read: CLEARANCE_PUBLIC on_deny: { omit: {} } };
+  optional string producer = 1;
+}
+`
+		res := protocompile.WithStandardImports(protocompile.CompositeResolver{
+			protocompile.ResolverFunc(func(path string) (protocompile.SearchResult, error) {
+				fd, err := protoregistry.GlobalFiles.FindFileByPath(path)
+				if err != nil {
+					return protocompile.SearchResult{}, protoregistry.NotFound
+				}
+				return protocompile.SearchResult{Desc: fd}, nil
+			}),
+			&protocompile.SourceResolver{Accessor: protocompile.SourceAccessorFromMap(
+				map[string]string{"srv/v1/m.proto": src})},
+		})
+		files, err := (&protocompile.Compiler{Resolver: res}).
+			Compile(context.Background(), "srv/v1/m.proto")
+		if err != nil {
+			panic("compiling the serve fixture: " + err.Error())
+		}
+
+		// protocompile leaves options as dynamic messages, so the file has to
+		// be round-tripped through the linked extension types before the
+		// policy reader can see a *toolv1.FieldPolicy rather than a
+		// *dynamicpb.Message. The same round trip the real producer does.
+		fdp := protodesc.ToFileDescriptorProto(files[0])
+		raw, err := proto.Marshal(fdp)
+		if err != nil {
+			panic(err)
+		}
+		fdp = &descriptorpb.FileDescriptorProto{}
+		if err := (proto.UnmarshalOptions{Resolver: protoregistry.GlobalTypes}).
+			Unmarshal(raw, fdp); err != nil {
+			panic(err)
+		}
+		fd, err := protodesc.NewFile(fdp, protoregistry.GlobalFiles)
+		if err != nil {
+			panic(err)
+		}
+		fixtureMsg = fd.Messages().ByName("M")
+	})
+	return fixtureMsg
+}
+
+var (
+	fixtureOnce sync.Once
+	fixtureMsg  protoreflect.MessageDescriptor
+)
+
+// chained fills what a Handler needs to build its governance chain.
+//
+// These tests are about the surface — routing, status codes, headers — but
+// every call now goes through the chain to get there, so they need a caller
+// the chain will admit. A test that wants a denial sets its own Principals.
+func chained(h *Handler) *Handler {
+	if h.HashKey == nil {
+		h.HashKey = []byte("a test hash key")
+	}
+	if h.Recorder == nil {
+		h.Recorder = &record.Memory{}
+	}
+	if h.Principals == nil {
+		h.Principals = principalFunc(admitted())
+	}
+	return h
+}
+
+// admitted is a caller the fixture tool admits: INTERNAL clearance, the READ
+// verb, no compartments because the tool declares none, and unscoped tool
+// sets. Deliberately the minimum that passes rather than a superuser — a
+// principal holding everything would pass step 2 even if step 2 stopped
+// reading the tool's declaration.
+func admitted() *toolplane.Principal {
+	return &toolplane.Principal{
+		Subject:   "user:test",
+		Kind:      toolv1.PrincipalKind_PRINCIPAL_KIND_USER,
+		Clearance: toolv1.Clearance_CLEARANCE_INTERNAL,
+		Verbs:     toolplane.NewVerbSet(toolv1.Verb_VERB_READ),
+	}
+}
+
+func principalFunc(p *toolplane.Principal) func(context.Context) (*toolplane.Principal, error) {
+	return func(context.Context) (*toolplane.Principal, error) { return p, nil }
 }
 
 func aCatalogue() *catalogue.Catalogue {
@@ -56,6 +162,12 @@ func aCatalogue() *catalogue.Catalogue {
 			Name:       "get_status",
 			Input:      message(),
 			Output:     message(),
+			// Declared rather than left zero. The chain fails closed on an
+			// unspecified verb and an unspecified clearance, so a Def with
+			// zero values is a tool nobody can call — which would make every
+			// routing test below pass for the wrong reason.
+			Verb:         toolv1.Verb_VERB_READ,
+			MinClearance: toolv1.Clearance_CLEARANCE_INTERNAL,
 		}},
 		DescriptorHashes: map[string]string{thePkg: good},
 	}
@@ -138,7 +250,7 @@ func decodeErr(t *testing.T, w *httptest.ResponseRecorder) connectErr {
 
 func TestACallToADeclaredToolIsRoutedAndAnswered(t *testing.T) {
 	inv := &fakeInvoker{fill: "the-service"}
-	h := &Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv}
+	h := chained(&Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv})
 
 	req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(string(protoBody(t, "caller"))))
 	req.Header.Set("Content-Type", contentProto)
@@ -164,7 +276,7 @@ func TestACallToADeclaredToolIsRoutedAndAnswered(t *testing.T) {
 // someone debugging a surprising answer can see which catalogue produced it
 // without correlating against a log line from hours earlier.
 func TestEveryAnswerSaysWhichCatalogueProducedIt(t *testing.T) {
-	h := &Handler{Store: &countingStore{c: aCatalogue()}, Invoker: &fakeInvoker{fill: "x"}}
+	h := chained(&Handler{Store: &countingStore{c: aCatalogue()}, Invoker: &fakeInvoker{fill: "x"}})
 
 	req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(""))
 	w := call(t, h, req)
@@ -193,7 +305,7 @@ func TestJSONAndBinaryBodiesReachTheSameTool(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			inv := &fakeInvoker{fill: "answered"}
-			h := &Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv}
+			h := chained(&Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv})
 
 			req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(c.body))
 			req.Header.Set("Content-Type", c.contentType)
@@ -214,7 +326,7 @@ func TestJSONAndBinaryBodiesReachTheSameTool(t *testing.T) {
 	// And the JSON answer is readable as JSON, not as proto bytes with a
 	// JSON content type.
 	inv := &fakeInvoker{fill: "answered"}
-	h := &Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv}
+	h := chained(&Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv})
 	req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(`{"producer":"caller"}`))
 	req.Header.Set("Content-Type", contentJSON)
 	w := call(t, h, req)
@@ -240,7 +352,7 @@ func TestJSONAndBinaryBodiesReachTheSameTool(t *testing.T) {
 // the caller.
 func TestARouteTheCatalogueDoesNotDeclareIsUnimplemented(t *testing.T) {
 	inv := &fakeInvoker{}
-	h := &Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv}
+	h := chained(&Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv})
 
 	w := call(t, h, httptest.NewRequest(http.MethodPost, "/t.v1.S/NoSuchMethod", strings.NewReader("")))
 
@@ -261,14 +373,14 @@ func TestARouteTheCatalogueDoesNotDeclareIsUnimplemented(t *testing.T) {
 // deployment. A 500 would send someone to read handler code that is working
 // fine.
 func TestADeclaredButUnreachableToolIsUnavailableNotAFailure(t *testing.T) {
-	h := &Handler{
+	h := chained(&Handler{
 		Store:   &countingStore{c: aCatalogue()},
 		Invoker: &fakeInvoker{err: fmt.Errorf("%w: %s", transport.ErrUnreachable, route)},
 		// A logger so that the operator-facing lines are exercised too: they
 		// are the only output an operator gets, and one that panics on a
 		// nil field would take the process down on the first bad deployment.
 		Log: discardLogger(),
-	}
+	})
 
 	w := call(t, h, httptest.NewRequest(http.MethodPost, route, strings.NewReader("")))
 
@@ -287,11 +399,11 @@ func TestADeclaredButUnreachableToolIsUnavailableNotAFailure(t *testing.T) {
 // A tool that ran and failed is the caller's problem, and must not be
 // reported with the same code as one that is not deployed.
 func TestAToolsOwnFailureIsInternalNotUnavailable(t *testing.T) {
-	h := &Handler{
+	h := chained(&Handler{
 		Store:   &countingStore{c: aCatalogue()},
 		Invoker: &fakeInvoker{err: errors.New("the account does not exist")},
 		Log:     discardLogger(),
-	}
+	})
 
 	w := call(t, h, httptest.NewRequest(http.MethodPost, route, strings.NewReader("")))
 
@@ -327,12 +439,12 @@ func quarantine(t *testing.T, store Catalogues) *Reconciler {
 // missing one. Same status as unreachable on purpose.
 func TestAQuarantinedToolIsUnavailable(t *testing.T) {
 	store := &countingStore{c: aCatalogue()}
-	h := &Handler{
+	h := chained(&Handler{
 		Store:      store,
 		Invoker:    &fakeInvoker{},
 		Reconciler: quarantine(t, store),
 		Log:        discardLogger(),
-	}
+	})
 
 	w := call(t, h, httptest.NewRequest(http.MethodPost, route, strings.NewReader("")))
 
@@ -365,7 +477,7 @@ func (b *countingBody) Read(p []byte) (int, error) {
 func TestAQuarantinedToolIsRefusedBeforeItsRequestIsRead(t *testing.T) {
 	store := &countingStore{c: aCatalogue()}
 	inv := &fakeInvoker{}
-	h := &Handler{Store: store, Invoker: inv, Reconciler: quarantine(t, store)}
+	h := chained(&Handler{Store: store, Invoker: inv, Reconciler: quarantine(t, store)})
 
 	body := &countingBody{}
 	req := httptest.NewRequest(http.MethodPost, route, body)
@@ -385,7 +497,7 @@ func TestAQuarantinedToolIsRefusedBeforeItsRequestIsRead(t *testing.T) {
 func TestOnlyAPostIsAToolCall(t *testing.T) {
 	store := &countingStore{c: aCatalogue()}
 	inv := &fakeInvoker{}
-	h := &Handler{Store: store, Invoker: inv}
+	h := chained(&Handler{Store: store, Invoker: inv})
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodHead} {
 		w := call(t, h, httptest.NewRequest(method, route, nil))
@@ -407,7 +519,7 @@ func TestOnlyAPostIsAToolCall(t *testing.T) {
 // generations prevent.
 func TestTheCatalogueIsReadOncePerRequest(t *testing.T) {
 	store := &countingStore{c: aCatalogue()}
-	h := &Handler{Store: store, Invoker: &fakeInvoker{fill: "x"}}
+	h := chained(&Handler{Store: store, Invoker: &fakeInvoker{fill: "x"}})
 
 	w := call(t, h, httptest.NewRequest(http.MethodPost, route, strings.NewReader("")))
 	if w.Code != http.StatusOK {
@@ -422,7 +534,7 @@ func TestTheCatalogueIsReadOncePerRequest(t *testing.T) {
 // claim the tool does not exist, when the truth is that this process does not
 // yet know what exists.
 func TestAProcessWithNoCatalogueIsUnavailable(t *testing.T) {
-	h := &Handler{Store: &countingStore{}, Invoker: &fakeInvoker{}}
+	h := chained(&Handler{Store: &countingStore{}, Invoker: &fakeInvoker{}})
 
 	w := call(t, h, httptest.NewRequest(http.MethodPost, route, strings.NewReader("")))
 
@@ -439,7 +551,7 @@ func TestAProcessWithNoCatalogueIsUnavailable(t *testing.T) {
 // caller cannot tell which of the two encodings was misread.
 func TestABodyThatDoesNotFitTheDeclaredInputIsRejected(t *testing.T) {
 	inv := &fakeInvoker{}
-	h := &Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv}
+	h := chained(&Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv})
 
 	req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(`{"producer": 7}`))
 	req.Header.Set("Content-Type", contentJSON)
@@ -471,7 +583,7 @@ func (failingBody) Read([]byte) (int, error) { return 0, errors.New("the connect
 // arguments the caller never finished sending.
 func TestARequestThatCouldNotBeReadIsNeverSentToTheTool(t *testing.T) {
 	inv := &fakeInvoker{}
-	h := &Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv}
+	h := chained(&Handler{Store: &countingStore{c: aCatalogue()}, Invoker: inv})
 
 	w := call(t, h, httptest.NewRequest(http.MethodPost, route, failingBody{}))
 

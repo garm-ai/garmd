@@ -466,7 +466,7 @@ func (c *Core) invoke(
 	// refusal disguised as a crash, and a NotFound quietly promoted to
 	// Internal.
 	//
-	// The refusal is returned directly rather than through c.unauthenticated:
+	// The refusal is returned directly rather than through Unauthenticated:
 	// that helper records its own row, and this path already has a defer that
 	// will record one. Two rows for one call would break the invariant this
 	// whole shape exists to hold.
@@ -623,13 +623,16 @@ func (c *Core) newEvent(p *Principal, procedure string) ledger.Event {
 	return ev
 }
 
-// unauthenticated is step 1's failure, ledgered.
+// Unauthenticated is step 1's failure, ledgered.
 //
 // Building the Principal belongs to the surface, so its failure returns
 // before Invoke is ever called — but the row still belongs to the same
 // ledger as every other terminal path. Without this, the one outcome nobody
 // authenticated for is the one outcome the ledger cannot see.
-func (c *Core) unauthenticated(ctx context.Context, procedure string, cause error) error {
+//
+// Exported for that reason and that reason only: the surface is the one
+// caller, because the surface is where step 1 happens.
+func (c *Core) Unauthenticated(ctx context.Context, procedure string, cause error) error {
 	ev := c.newEvent(nil, procedure)
 	ev.ErrorDetail = "no principal for " + procedure
 	if cause != nil {

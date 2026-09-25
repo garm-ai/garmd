@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,7 +21,10 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/spf13/cobra"
 
+	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/catalogue"
+	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/serve"
 	garmnats "github.com/garm-ai/garmd/internal/transport/nats"
 )
@@ -93,6 +97,7 @@ func bytesHuman(n int64) string {
 
 func newServeCmd() *cobra.Command {
 	var cataloguePath, natsURL, listen string
+	var jwksURL, issuer, audience, hashKeyFile string
 	var maxTools int
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -104,6 +109,10 @@ func newServeCmd() *cobra.Command {
 				natsURL:   natsURL,
 				listen:    listen,
 				maxTools:  maxTools,
+				jwksURL:   jwksURL,
+				issuer:    issuer,
+				audience:  audience,
+				hashKey:   hashKeyFile,
 			})
 		},
 	}
@@ -118,6 +127,22 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().IntVar(&maxTools, "max-tools", 0,
 		"Refuse a catalogue declaring more tools than this. 0 means no limit; "+
 			"set it to catch a deployment pointed at the wrong catalogue")
+	cmd.Flags().StringVar(&jwksURL, "jwks", "",
+		"JWKS endpoint whose keys sign the tokens this plane accepts. Required: "+
+			"a plane that cannot identify its callers can make only one honest "+
+			"decision, and it is not to serve them")
+	cmd.Flags().StringVar(&issuer, "issuer", "",
+		"Issuer this plane trusts. Required, and separate from --jwks on purpose: "+
+			"trusting whatever iss a fetched key set happens to sign means trusting "+
+			"whoever can answer that URL")
+	cmd.Flags().StringVar(&audience, "audience", "garm",
+		"Audience minted tokens must name. A token for another service must not "+
+			"be spendable here")
+	cmd.Flags().StringVar(&hashKeyFile, "hash-key-file", "",
+		"File holding the key for hash redactions. Required, and it must be the "+
+			"SAME key on every replica and across restarts: a key that changes "+
+			"means the same value hashes two ways, so the correlation those "+
+			"redactions exist to preserve stops working silently")
 	return cmd
 }
 
@@ -126,6 +151,10 @@ type serveOpts struct {
 	natsURL   string
 	listen    string
 	maxTools  int
+	jwksURL   string
+	issuer    string
+	audience  string
+	hashKey   string
 }
 
 func runServe(cmd *cobra.Command, o serveOpts) error {
@@ -137,6 +166,27 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	if path == "" {
 		return fmt.Errorf("--catalogue is required: garmd serves the tools an artifact " +
 			"declares, and will not bind a listener it has nothing to serve on")
+	}
+
+	// Identity and the redaction key are refused up front, before anything is
+	// loaded or bound.
+	//
+	// There is no anonymous mode and no --insecure. Every such switch that
+	// has ever existed has ended up on in production, and the failure is
+	// silent: the plane serves, the tools answer, and every call is
+	// authorised as nobody. Running locally is not a reason to relax it —
+	// `garmdev idp` from github.com/garm-ai/devkit mints tokens against a
+	// real key set for exactly this.
+	if o.jwksURL == "" || o.issuer == "" {
+		return fmt.Errorf("--jwks and --issuer are both required: garmd decides what a " +
+			"caller may do, which it cannot do without knowing who they are.\n" +
+			"For a laptop: `go run github.com/garm-ai/devkit/cmd/garmdev idp` then\n" +
+			"  --jwks http://127.0.0.1:7450/.well-known/jwks.json \\\n" +
+			"  --issuer https://garmdev.invalid/idp")
+	}
+	hashKey, err := readHashKey(o.hashKey)
+	if err != nil {
+		return err
 	}
 
 	store := catalogue.NewStore(catalogue.Options{MaxTools: maxTools})
@@ -192,6 +242,20 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
 	tp := garmnats.New(nc)
 
+	// The compartments a token may assert come from the CATALOGUE, not from
+	// this binary: an enterprise defines its own taxonomy and ships it in the
+	// artifact. A name the catalogue does not declare is dropped from the
+	// principal rather than refused, so an IdP-side typo costs access and not
+	// availability — the surface logs the drop, because dropping authority
+	// silently is how a typo becomes an unexplained denial nobody can trace.
+	//
+	// Built once, from the boot catalogue. See KNOWN-GAPS.md: a reload that
+	// adds a compartment does not reach this registry until a restart.
+	reg, err := policy.NewRegistry(cat.Compartments)
+	if err != nil {
+		return fmt.Errorf("the catalogue's compartment declarations: %w", err)
+	}
+
 	// Reconciliation is not optional in a deployment. Without it, a service
 	// built from a different contract answers anyway — protobuf ignores
 	// unknown fields and defaults absent ones — and the call is authorised,
@@ -199,16 +263,35 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// else.
 	rec := &serve.Reconciler{Store: store, Discoverer: tp, Log: log}
 
+	// Step 1. The verifier fetches the key set lazily and caches it, so a
+	// slow or absent IdP at boot costs the first call rather than the
+	// process.
+	verifier := authn.NewVerifier(authn.Config{
+		KeySet:       authn.NewKeySet(authn.KeySetConfig{URL: o.jwksURL}),
+		Issuers:      []string{o.issuer},
+		Audience:     o.audience,
+		Compartments: reg,
+	})
+
 	h := &serve.Handler{
 		Store:      store,
 		Invoker:    tp,
 		Log:        log,
 		Reconciler: rec,
+		Principals: authn.PrincipalFunc(verifier, log),
+		HashKey:    hashKey,
+		// slog for now. A bank needs this durable and tamper-evident, and
+		// KNOWN-GAPS.md says so rather than this line pretending otherwise.
+		Recorder: record.NewSlog(log),
 	}
 
 	srv := &http.Server{
-		Addr:              o.listen,
-		Handler:           h,
+		Addr: o.listen,
+		// The middleware only LIFTS the bearer token into the context; it
+		// never verifies it. Verification is step 1, inside the chain's
+		// reach, so a bad token is refused with a ledger row rather than by a
+		// 401 the ledger never sees.
+		Handler:           authn.Middleware(h),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -226,15 +309,51 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	}()
 
 	fmt.Fprintf(out, "listening on %s, routing over %s\n", o.listen, nc.ConnectedUrl())
+	fmt.Fprintf(out, "  callers verified against %s (issuer %s, audience %s)\n",
+		o.jwksURL, o.issuer, o.audience)
 	fmt.Fprintf(out, "\n"+
-		"  WARNING: this build ROUTES but does not GOVERN. None of the ten steps\n"+
-		"  are implemented — no authentication, no authorization, no input\n"+
-		"  checking, no redaction, no ledger. Do not put it in front of anything\n"+
-		"  that matters.\n\n")
+		"  Every call goes through the chain. Steps 1, 2, 3, 8 and 9 are\n"+
+		"  implemented; instance authorization, grants and notify are NOT, and a\n"+
+		"  tool declaring them is mounted as though it had not. See KNOWN-GAPS.md\n"+
+		"  before putting this in front of anything that matters.\n\n")
 
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	fmt.Fprintln(out, "stopped")
 	return nil
+}
+
+// readHashKey loads the key that keys hash redactions.
+//
+// From a FILE rather than a flag, because a flag value is visible in `ps`, in
+// shell history, and in whatever logs the orchestrator keeps of the command
+// line it ran. A file is what a secret manager mounts.
+//
+// There is no generated fallback. A random key per boot would work and hide
+// the problem: hashes would differ between replicas and across restarts, so
+// the correlation these redactions exist to preserve would stop working with
+// nothing to see. Better to refuse than to silently do the useless thing.
+func readHashKey(path string) ([]byte, error) {
+	if path == "" {
+		return nil, fmt.Errorf("--hash-key-file is required: hash redactions replace a " +
+			"value with a keyed digest so the same value stays recognisable across " +
+			"rows, and a key this process invented would make that false without " +
+			"anything failing")
+	}
+	key, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading the hash key: %w", err)
+	}
+	key = bytes.TrimSpace(key)
+	// 16 bytes is the floor, not a recommendation. Short keys are guessable,
+	// and a guessable key makes a hash redaction reversible by anyone willing
+	// to try the values they already suspect — which for identifiers is all
+	// of them.
+	if len(key) < 16 {
+		return nil, fmt.Errorf("the hash key in %s is %d bytes; at least 16 are needed, "+
+			"or the digests it produces can be reversed by guessing the input",
+			path, len(key))
+	}
+	return key, nil
 }

@@ -19,6 +19,7 @@ require (
 	cel.dev/expr v0.25.3 // indirect
 	github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.5 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect

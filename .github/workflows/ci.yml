@@ -41,6 +41,20 @@ jobs:
           install: true
           cache: true
 
+      # garmd must never depend on devkit, which mints tokens.
+      #
+      # devkit can assert any identity — any clearance, any compartment, any
+      # delegation chain. This daemon decides what an identity may DO. The two
+      # in one dependency graph means something in a request path can reach a
+      # minter, and the reciprocal of this check lives in devkit's own CI.
+      - name: no dependency on the token minter
+        run: |
+          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/devkit'; then
+            echo "garmd depends on devkit, which mints identities" >&2
+            exit 1
+          fi
+          echo "ok: garmd cannot reach a token minter"
+
       # garmd must never build-depend on a repository that implements tools.
       # A catalogue crosses that line as DATA, loaded at boot — never as an
       # import. This is the inversion the whole architecture buys: garmd's

@@ -62,6 +62,20 @@ func codeFor(err error) (connect.Code, bool) {
 	return 0, false
 }
 
+// CodeOf reports the connect code a chain refusal carries.
+//
+// A surface needs this to answer at all: the chain's refusals are
+// transport-neutral sentinels, and something has to decide that errNotFound
+// is a 404 before a status line can be written. Pairing it with ScrubError
+// gives a surface the whole answer — the code from here, the text from
+// there, and the reason left on the ledger where it belongs.
+//
+// An error that is NOT the chain's own keeps whatever code it already
+// carries, which is what lets a resolver's NOT_FOUND survive as a NOT_FOUND.
+func CodeOf(err error) connect.Code {
+	return connect.CodeOf(asConnectError(err))
+}
+
 // CodeOfForTest reports the connect code an error carries, as connect's own
 // lowercase wire spelling (e.g. "unavailable", "not_found") — exposed so a
 // test outside this package (Task 9's end-to-end assertions against a
@@ -80,7 +94,7 @@ func codeFor(err error) (connect.Code, bool) {
 // asConnectError unchanged, since codeFor only recognises this package's
 // own sentinel errors.
 func CodeOfForTest(err error) string {
-	return connect.CodeOf(asConnectError(err)).String()
+	return CodeOf(err).String()
 }
 
 // asConnectError gives a chain refusal its connect code, and leaves anything
