@@ -189,8 +189,13 @@ func (s *countingStore) Current() *catalogue.Catalogue {
 // fakeInvoker stands in for the hop. err is what the tool call produces; fill
 // is what it writes into the response when it succeeds.
 type fakeInvoker struct {
-	err   error
-	fill  string
+	err  error
+	fill string
+	// field is what fill is written into, defaulting to the shared fixture's
+	// "producer". Named rather than assumed because a second fixture message
+	// does not have that field, and Set on a nil descriptor panics — which
+	// surfaces as a 500 and reads like a handler bug.
+	field string
 	calls atomic.Int64
 }
 
@@ -199,8 +204,16 @@ func (f *fakeInvoker) Invoke(_ context.Context, _ string, _, resp proto.Message)
 	if f.err != nil {
 		return f.err
 	}
+	name := f.field
+	if name == "" {
+		name = "producer"
+	}
 	m := resp.ProtoReflect()
-	m.Set(m.Descriptor().Fields().ByName("producer"), protoreflect.ValueOfString(f.fill))
+	fd := m.Descriptor().Fields().ByName(protoreflect.Name(name))
+	if fd == nil {
+		return fmt.Errorf("fakeInvoker: %s has no field %q", m.Descriptor().FullName(), name)
+	}
+	m.Set(fd, protoreflect.ValueOfString(f.fill))
 	return nil
 }
 
