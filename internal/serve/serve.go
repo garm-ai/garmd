@@ -88,6 +88,18 @@ type Handler struct {
 	// design is against.
 	Recorder ledger.Recorder
 
+	// FGA, Grants and Notifier are steps 4/7, 5 and 10. Nil means the step is
+	// not available here, and AddTools then refuses to mount any tool that
+	// declares it — so nil can never mean "declared but skipped".
+	//
+	// They are on the Handler rather than only on CoreConfig because the
+	// plane is built per catalogue generation: a seam reachable only at
+	// NewCore would be unreachable from the daemon entirely, which is what
+	// they were until this existed.
+	FGA      toolplane.FGAChecker
+	Grants   toolplane.GrantVerifier
+	Notifier toolplane.Notifier
+
 	// Audit is the durable, separately-retained stream — the half of the
 	// record that may REFUSE a call, for a tool declaring fail_closed.
 	//
