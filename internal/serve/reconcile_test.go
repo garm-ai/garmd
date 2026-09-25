@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,14 +14,18 @@ import (
 )
 
 // fakeDiscoverer answers with whatever a test says is running.
+//
+// calls is atomic because Run sweeps on its own goroutine while the test
+// watches: a plain int here races, and the race detector is right about it
+// even though the test would pass without one.
 type fakeDiscoverer struct {
 	services []transport.Service
 	err      error
-	calls    int
+	calls    atomic.Int64
 }
 
 func (f *fakeDiscoverer) Services(context.Context) ([]transport.Service, error) {
-	f.calls++
+	f.calls.Add(1)
 	return f.services, f.err
 }
 func (f *fakeDiscoverer) Watch(context.Context) (<-chan transport.Event, error) {
@@ -150,11 +155,11 @@ func TestRunSweepsImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go r.Run(ctx)
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && f.calls == 0 {
+	for time.Now().Before(deadline) && f.calls.Load() == 0 {
 		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()
-	if f.calls == 0 {
+	if f.calls.Load() == 0 {
 		// Waiting a full interval before the first sweep would route to a
 		// mismatched service for that entire window.
 		t.Error("Run did not sweep before its first tick")
