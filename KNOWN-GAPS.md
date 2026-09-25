@@ -10,18 +10,27 @@
 - `internal/transport` — the Invoker and Discoverer ports. No adapter.
 - `internal/tool` — `Def`, the in-memory declaration.
 
+- `internal/serve` — the agent-facing surface. Dynamic dispatch: a request is
+  unmarshalled into a message built from a catalogue descriptor, routed over
+  NATS, and the reply unmarshalled into another. No generated types anywhere.
+- `internal/transport/nats` — invocation, and discovery over `$SRV.INFO`.
+
 ## Not built
 
-**No resolver.** `serve` loads a catalogue and then refuses, because it cannot
-route to the services that implement it. The NATS adapter behind
-`transport.Invoker` is the next piece.
+**No chain. This routes; it does not govern.** None of the ten steps exist:
+no authentication, no authorization, no input checking, no redaction, no
+ledger. `serve` says so at startup, and it means it — in front of anything
+real this is an ungoverned proxy wearing a governed one's name.
 
-**No chain.** None of the ten steps are ported. Nothing here authenticates,
-authorises, checks input or sanitises — so nothing here should be deployed.
+**No reconciliation, and the gap is on the producer side.** A service
+advertises its descriptor hash on `$SRV.INFO`, and `garmd` reads it into
+`transport.Service.Identity` — but the catalogue carries no hash to compare it
+against, so nothing checks that a service implements the contract the
+catalogue declares. `garm catalogue build` needs to stamp the per-package hash
+using the generator's existing function; a second implementation of that hash
+would be worse than none.
 
-**No listeners.** `serve` binds nothing.
-
-**No MCP surface, no catalogue service.**
+**No MCP surface, no catalogue service, no second listener.**
 
 ## Reachable but unexercised
 

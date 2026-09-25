@@ -6,13 +6,23 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
 	"runtime/debug"
+	"syscall"
+	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/spf13/cobra"
 
 	"github.com/garm-ai/garmd/internal/catalogue"
+	"github.com/garm-ai/garmd/internal/serve"
+	garmnats "github.com/garm-ai/garmd/internal/transport/nats"
 )
 
 func main() {
@@ -82,25 +92,45 @@ func bytesHuman(n int64) string {
 }
 
 func newServeCmd() *cobra.Command {
-	var cataloguePath string
+	var cataloguePath, natsURL, listen string
 	var maxTools int
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve the tool plane",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runServe(cmd, cataloguePath, maxTools)
+			return runServe(cmd, serveOpts{
+				catalogue: cataloguePath,
+				natsURL:   natsURL,
+				listen:    listen,
+				maxTools:  maxTools,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&cataloguePath, "catalogue", "",
 		"Path to the catalogue artifact this process serves")
+	cmd.Flags().StringVar(&natsURL, "nats", nats.DefaultURL,
+		"NATS server the tool services are reachable on")
+	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:7440",
+		"Address for the agent-facing tool plane. Loopback by default: a plane "+
+			"nobody can reach is an outage someone notices in minutes, and one "+
+			"exposed to the cluster is a breach nobody notices at all")
 	cmd.Flags().IntVar(&maxTools, "max-tools", 0,
 		"Refuse a catalogue declaring more tools than this. 0 means no limit; "+
 			"set it to catch a deployment pointed at the wrong catalogue")
 	return cmd
 }
 
-func runServe(cmd *cobra.Command, path string, maxTools int) error {
+type serveOpts struct {
+	catalogue string
+	natsURL   string
+	listen    string
+	maxTools  int
+}
+
+func runServe(cmd *cobra.Command, o serveOpts) error {
+	path := o.catalogue
+	maxTools := o.maxTools
 	// A tool plane with no catalogue serves nothing. Saying so is better than
 	// binding a listener that answers 404 — that is the failure nothing
 	// downstream can detect.
@@ -149,6 +179,51 @@ func runServe(cmd *cobra.Command, path string, maxTools int) error {
 		fmt.Fprintf(out, "  %-44s %s%s\n", d.FQN, d.Verb, shown)
 	}
 
-	return fmt.Errorf("no resolver: garmd can load a catalogue but cannot yet route to " +
-		"the services that implement it")
+	nc, err := nats.Connect(o.natsURL,
+		nats.Name("garmd"),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(time.Second),
+	)
+	if err != nil {
+		return fmt.Errorf("connecting to nats at %s: %w", o.natsURL, err)
+	}
+	defer nc.Close()
+
+	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
+	h := &serve.Handler{
+		Store:   store,
+		Invoker: garmnats.New(nc),
+		Log:     log,
+	}
+
+	srv := &http.Server{
+		Addr:              o.listen,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// SIGTERM shuts the listener down gracefully: in-flight calls finish, new
+	// ones are refused. A tool call cut off mid-flight is a call whose effect
+	// the caller cannot determine.
+	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdown)
+	}()
+
+	fmt.Fprintf(out, "listening on %s, routing over %s\n", o.listen, nc.ConnectedUrl())
+	fmt.Fprintf(out, "\n"+
+		"  WARNING: this build ROUTES but does not GOVERN. None of the ten steps\n"+
+		"  are implemented — no authentication, no authorization, no input\n"+
+		"  checking, no redaction, no ledger. Do not put it in front of anything\n"+
+		"  that matters.\n\n")
+
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	fmt.Fprintln(out, "stopped")
+	return nil
 }
