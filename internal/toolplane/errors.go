@@ -76,23 +76,17 @@ func CodeOf(err error) connect.Code {
 	return connect.CodeOf(asConnectError(err))
 }
 
-// CodeOfForTest reports the connect code an error carries, as connect's own
-// lowercase wire spelling (e.g. "unavailable", "not_found") — exposed so a
-// test outside this package (Task 9's end-to-end assertions against a
-// NATS-backed resolver) can assert on the code a scrubbed error carries
-// without importing connect-rpc's own Code type or duplicating its
-// String() spellings.
+// CodeOfForTest is CodeOf as connect's own lowercase wire spelling
+// ("unavailable", "not_found"), for a test that wants to assert on a code
+// without importing connect-rpc or restating its String() spellings.
 //
-// It runs err through asConnectError first, exactly as the connect surface
-// does in interceptor.go: a raw chain refusal (core.Invoke returns
-// errUnavailable itself, transport-neutral, when called directly rather
-// than through a connect handler) has no code of its own until something
-// assigns one, and a test calling Invoke directly — as this package's own
-// tests do — would otherwise always see CodeUnknown regardless of which
-// refusal actually fired. An error that already carries a connect code (a
-// resolver's own, or one natsresolver.Call already mapped) passes through
-// asConnectError unchanged, since codeFor only recognises this package's
-// own sentinel errors.
+// It survives CodeOf being exported because the two answer different
+// questions: a surface needs the typed Code to choose a status, and a test
+// needs the string it will see on the wire. Both go through asConnectError
+// first, and that is the part worth knowing — a raw chain refusal is a
+// transport-neutral sentinel with no code of its own until something assigns
+// one, so a test calling Invoke directly would otherwise see CodeUnknown
+// whichever refusal actually fired.
 func CodeOfForTest(err error) string {
 	return CodeOf(err).String()
 }

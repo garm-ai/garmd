@@ -390,12 +390,15 @@ func (c *Core) Invoke(
 }
 
 // invoke is the chain of spec §5.1 steps 2-10. fn is the resolver for this
-// call: Invoke supplies the registered one, and the connect adapter supplies
-// the connect handler it is wrapping. The generated Mount now registers a
-// typed resolver for every tool, so the registry is no longer empty — why
-// the connect adapter still cannot use it (connect.AnyResponse is a sealed
-// interface, so an interceptor holding only a proto.Message has no way to
-// build a response) is set out in full on WrapUnary in interceptor.go.
+// call, and today Invoke is its only caller, always supplying the one the
+// catalogue registered.
+//
+// The parameter is kept rather than folded into the body because it costs
+// nothing and it is the seam a second surface would need: a front door that
+// holds a response type this package cannot name — connect's AnyResponse is
+// a sealed interface, so an interceptor holding only a proto.Message cannot
+// build one — would have to pass its own resolver in rather than register
+// it.
 //
 // fn never crosses the package boundary in either direction, so the
 // structural guarantee is unchanged: outside this package the only way to
@@ -853,7 +856,7 @@ func (c *Core) checkAvailability(t ToolDef, ev *ledger.Event) error {
 // InvocationContext that Core itself owns — the principal's own assertions
 // and the ledger's own attribution — onto ctx, via contracts/callctx's
 // existing seam (callctx.NewContext/FromContext), so an out-of-process
-// resolver (a NATS-backed one, above all — toolplane/natsresolver.Call)
+// resolver (a NATS-backed one, above all — transport/nats.Transport.Invoke)
 // can read them back without Core handing out anything reachable.
 //
 // This is deliberately NOT a new parameter on ResolverFunc. ResolverFunc's
@@ -871,7 +874,7 @@ func (c *Core) checkAvailability(t ToolDef, ev *ledger.Event) error {
 // that can see clearance is a tool that will eventually filter, the second
 // unreviewed policy copy every design doc in this tree refuses), and the
 // caller's own credential (the token itself never crosses this boundary in
-// any form — see natsresolver.Call's own doc comment on headers carrying
+// any form — see transport/nats.Transport.Invoke's own comment on headers carrying
 // assertions, never credentials).
 //
 // causation_id is also left unset — empty because this build has no front
@@ -883,7 +886,7 @@ func (c *Core) checkAvailability(t ToolDef, ev *ledger.Event) error {
 //
 // call_id, the deadline and trace context are deliberately NOT set here:
 // those are per-HOP, minted by whichever resolver actually crosses the
-// wire (natsresolver.Call mints its own), not per-INVOKE. A resolver that
+// wire (the transport mints its own), not per-INVOKE. A resolver that
 // finds an InvocationContext already on ctx must fill those in itself
 // rather than trust ones set this far upstream, or two resolvers reusing
 // one ctx.Value(...) instance across retries would collide on one call_id.
@@ -893,7 +896,7 @@ func (c *Core) withInvocationContext(ctx context.Context, p *Principal) context.
 	// decodes an inbound callctx.Header (a delegated call, say) and puts it
 	// on ctx before calling Invoke, overwriting it here would silently
 	// sever that caller's own trace — the same reasoning
-	// natsresolver.Call already applies to the rest of the message when it
+	// the transport already applies to the rest of the message when it
 	// clones an existing InvocationContext instead of building from
 	// nothing.
 	correlationID := newCorrelationID()

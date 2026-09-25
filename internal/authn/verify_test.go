@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	jose "github.com/go-jose/go-jose/v4"
-	"github.com/garm-ai/garmd/internal/authn"
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	"github.com/garm-ai/garmd/internal/authn"
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 // sign mints a token from body, signed by key under kid.

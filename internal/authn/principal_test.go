@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/garmd/internal/authn"
 )
 
 type claimLevel struct {

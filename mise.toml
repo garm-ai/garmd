@@ -27,6 +27,20 @@ run = "go vet ./..."
 description = "Format"
 run = "go fmt ./..."
 
+[tasks."fmt-check"]
+description = "Fail if anything is unformatted"
+# Part of CI because `go vet` does not check formatting, and a port that
+# rewrites import paths with sed leaves import blocks out of order — which is
+# exactly how four files reached main unformatted without anything noticing.
+run = """
+out=$(gofmt -l ./cmd ./internal)
+if [ -n "$out" ]; then
+  echo "unformatted — run 'mise run fmt':" >&2
+  echo "$out" >&2
+  exit 1
+fi
+"""
+
 [tasks.ci]
 description = "Everything CI runs"
-depends = ["lint", "build", "test"]
+depends = ["fmt-check", "lint", "build", "test"]

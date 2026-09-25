@@ -9,8 +9,8 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 
-	"github.com/garm-ai/garmd/internal/toolplane"
 	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/garmd/internal/toolplane"
 )
 
 // permittedAlgorithms is the allowlist, and it lives here rather than in

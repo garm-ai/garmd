@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garmd/internal/toolplane"
 	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/garmd/internal/toolplane"
 )
 
 // maxDelegationDepth is the documented ceiling on a delegation chain.

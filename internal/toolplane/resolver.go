@@ -16,12 +16,13 @@ import (
 // not.
 //
 // A resolver that returns (nil, nil) has produced nothing to sanitize, and
-// the surface decides what to send. No resolver in this build does: the
-// generated ones refuse a nil response outright, and the connect adapter —
-// which used to return (nil, nil) for a response payload that is not a proto
-// message — now returns an error there instead, because a payload the chain
-// cannot classify is one it cannot make safe. See WrapUnary in
-// interceptor.go.
+// the surface decides what to send. The one resolver in this build never
+// does: serve wraps the NATS hop, and a hop that fails returns an error
+// rather than an empty success — a payload the chain cannot classify is one
+// it cannot make safe.
+//
+// The case is handled anyway because ResolverFunc is exported and the next
+// surface will write its own.
 type ResolverFunc func(ctx context.Context, req proto.Message) (proto.Message, error)
 
 // registration is one procedure's resolver, plus the factory for its request

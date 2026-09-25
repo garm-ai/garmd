@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	jose "github.com/go-jose/go-jose/v4"
 	"github.com/garm-ai/garmd/internal/authn"
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 // newKey returns an ECDSA signing key and its JWK, tagged with kid.
