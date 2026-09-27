@@ -38,10 +38,17 @@ type GarmClaims struct {
 // claim — the party acting on this subject's behalf — and nests to whatever
 // depth the issuer minted.
 type Claims struct {
-	Issuer, Subject, Audience, Tenant, ID string
-	ExpiresAt, IssuedAt                   time.Time
-	Garm                                  GarmClaims
-	Act                                   *Claims
+	Issuer, Subject, Tenant, ID string
+
+	// Audience is `aud`, which RFC 7519 makes a string OR an array. It is
+	// parsed as a list in both cases and checked by containment: a token
+	// minted for several audiences is a valid token, and which position
+	// this deployment occupies in that list means nothing.
+	Audience []string
+
+	ExpiresAt, IssuedAt time.Time
+	Garm                GarmClaims
+	Act                 *Claims
 }
 
 // Depth counts the subject plus every actor in the chain.
@@ -76,7 +83,7 @@ func parseClaims(raw map[string]any, depth int) (*Claims, error) {
 	c := &Claims{
 		Issuer:   str(raw, "iss"),
 		Subject:  str(raw, "sub"),
-		Audience: str(raw, "aud"),
+		Audience: strSlice(raw, "aud"),
 		Tenant:   str(raw, "tenant"),
 		ID:       str(raw, "jti"),
 	}
