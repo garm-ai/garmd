@@ -149,18 +149,27 @@ wider — and it fails silently, which is the objectionable half.
 tool-list panel needs the catalogue service and reports that it cannot reach
 garm until then.
 
-## Drift with devkit is not caught
+## Drift with devkit is caught, for the personas devkit.json covers
 
 `garm-ai/devkit` mints the dev tokens this verifier reads, and neither may
 import the other: a module that can assert any identity must not be in the
 dependency graph of one that decides what an identity may do. CI asserts it
 from both sides.
 
-Nothing currently fails if the token body and the verifier disagree. In the
-monorepo one test minted and verified in a single process; that test is split,
-and the seam between the halves is unguarded. The intended fix is a
-cross-repository CI check — clone devkit, mint, assert the `Principal` — which
-keeps it caught with no build edge either way. It is not built.
+The seam between minting and verifying is a cross-repository CI check now,
+not a same-process test. `internal/conformance` loads a suite of cases from
+`spec/conformance/identity/devkit.json`, drives the running devkit IdP over
+HTTP to mint a token per case, verifies it with this repository's own
+`internal/authn`, and asserts the resulting `Principal` against the case's
+expectation. The `conformance` job in `.github/workflows/ci.yml` starts the
+dev IdP, runs that suite, and fails the build on any disagreement — with no
+build-time edge between the two repositories: devkit is `checkout`'d and run
+as a process, never imported, and a dedicated step re-asserts `go list -deps
+-test ./...` never names `garm-ai/devkit`.
+
+What remains unguarded: the suite covers the five personas in
+`devkit.json` and no others, so a claim shape only a different persona would
+exercise is still unchecked.
 
 ## Coverage
 
