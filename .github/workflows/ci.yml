@@ -121,10 +121,15 @@ jobs:
       # that branch and garmd's feat/identity-foundations land on their
       # respective default branches. That first red run is expected, not a
       # regression.
+      #
+      # spec is a private repository, so this job requires a GARM_CI_TOKEN
+      # secret with read access to it. Because garmd is public, PRs from
+      # forks cannot access secrets, so this job will not run on them.
       - uses: actions/checkout@v5
         with:
           repository: garm-ai/spec
           path: spec
+          token: ${{ secrets.GARM_CI_TOKEN || github.token }}
 
       - uses: jdx/mise-action@v2
         with:
@@ -135,14 +140,21 @@ jobs:
       - name: start the dev IdP
         working-directory: devkit
         run: |
+          # Redirected to a file rather than left attached to this step's
+          # log: a backgrounded process that inherits an unredirected
+          # stdout/stderr keeps that pipe's write end open after this script
+          # exits, and the runner reads its log until EOF — which never
+          # arrives, because the IdP runs forever. That hangs the step
+          # itself even though the readiness loop below exits fine.
           go run ./cmd/garmdev idp \
             --personas examples/personas.yaml \
-            --audience garm &
+            --audience garm > /tmp/idp.log 2>&1 &
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:7450/.well-known/jwks.json >/dev/null && exit 0
             sleep 1
           done
           echo "the dev IdP never came up" >&2
+          cat /tmp/idp.log >&2
           exit 1
 
       - name: conformance
