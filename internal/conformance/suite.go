@@ -57,8 +57,20 @@ type Expect struct {
 	Clearance    string   `json:"clearance"`
 	Compartments []string `json:"compartments"`
 	Verbs        []string `json:"verbs"`
-	ToolSets     []string `json:"toolSets"`
-	Dropped      []string `json:"dropped"`
+
+	// ToolSets asserts scope, and its zero value is deliberately not a slice:
+	// nil/absent, `[]`, and a populated list are three different assertions,
+	// mirroring the same load-bearing distinction on toolplane.Principal.
+	//
+	//   - absent, or JSON null: the principal must be UNSCOPED (nil).
+	//   - `[]`:                 the principal must be scoped to NOTHING
+	//                           (non-nil, empty) — what two disjoint scopes
+	//                           intersect to.
+	//   - `["a","b"]`:          the principal's scope must equal this set,
+	//                           order-insensitively.
+	ToolSets *[]string `json:"toolSets"`
+
+	Dropped []string `json:"dropped"`
 }
 
 // LoadSuite reads and validates a suite file.

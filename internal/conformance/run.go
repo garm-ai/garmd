@@ -136,7 +136,7 @@ func compare(e *Expect, p *toolplane.Principal, dropped []string, reg *policy.Re
 	if d := diffSets(verbNames(p.Verbs), e.Verbs); d != "" {
 		bad = append(bad, "verbs: "+d)
 	}
-	if d := diffSets(p.ToolSets, e.ToolSets); d != "" {
+	if d := diffToolSets(p.ToolSets, e.ToolSets); d != "" {
 		bad = append(bad, "toolSets: "+d)
 	}
 	if d := diffSets(dropped, e.Dropped); d != "" {
@@ -159,6 +159,34 @@ func diffSets(got, want []string) string {
 		return ""
 	}
 	return fmt.Sprintf("got %v want %v", g, w)
+}
+
+// diffToolSets compares scope, where nil and non-nil-empty are NOT the same
+// thing: nil means unscoped (the full catalogue) and a non-nil empty slice
+// means scoped to nothing, per toolplane.Principal's own doc comment. A
+// suite must be able to assert either, so this does not route through
+// diffSets, which treats them as equal.
+func diffToolSets(got []string, want *[]string) string {
+	switch {
+	case want == nil:
+		if got != nil {
+			return fmt.Sprintf("got %v want unscoped (nil)", got)
+		}
+		return ""
+	case len(*want) == 0:
+		if got == nil {
+			return "got unscoped (nil) want scoped to nothing (non-nil, empty)"
+		}
+		if len(got) != 0 {
+			return fmt.Sprintf("got %v want scoped to nothing (non-nil, empty)", got)
+		}
+		return ""
+	default:
+		if got == nil {
+			return fmt.Sprintf("got unscoped (nil) want %v", *want)
+		}
+		return diffSets(got, *want)
+	}
 }
 
 func verbNames(vs toolplane.VerbSet) []string {

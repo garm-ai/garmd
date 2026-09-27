@@ -229,3 +229,146 @@ func TestRunAssertsDroppedCompartments(t *testing.T) {
 		t.Fatalf("a correctly-dropped compartment was reported as a failure: %v", res[0].Err)
 	}
 }
+
+// Fix round 1, Finding 1. ToolSets has three states — absent/null (unscoped),
+// `[]` (scoped to nothing) and a populated list — and nil vs. non-nil-empty
+// is load-bearing per toolplane.Principal's own doc comment. These three
+// tests exercise all three, including the one the pre-fix diffSets could not
+// catch: a suite that demands "scoped to nothing" must fail against a
+// principal that came back unscoped, even though both look empty once
+// sorted.
+
+func TestRunAssertsUnscopedToolSets(t *testing.T) {
+	now := time.Now()
+	key := newECKey(t)
+	m := &fakeMinter{key: key, bodies: map[string]map[string]any{
+		// No `tool_sets` claim at all: the fold must leave ToolSets nil.
+		"alice": body(now, "user:alice", "CLEARANCE_PUBLIC", nil, []any{"READ"}, nil),
+	}}
+	s := &conformance.Suite{
+		Issuer: "https://minter.test", Audience: "garm",
+		Compartments: []string{"support"},
+		Cases: []conformance.Case{{
+			Name: "unscoped", Mint: map[string]string{"user": "alice"},
+			Expect: &conformance.Expect{
+				Subject: "user:alice", Clearance: "CLEARANCE_PUBLIC",
+				Verbs: []string{"VERB_READ"},
+				// ToolSets left nil: absent/null means "assert unscoped".
+			},
+		}},
+	}
+
+	res, _ := conformance.Run(context.Background(), s, m, jwksFor(t, key))
+	if res[0].Err != nil {
+		t.Fatalf("an unscoped principal failed an unscoped expectation: %v", res[0].Err)
+	}
+}
+
+func TestRunAssertsToolSetsScopedToNothing(t *testing.T) {
+	now := time.Now()
+	key := newECKey(t)
+	// Two hops whose tool_sets share nothing: Fold's intersectSets produces a
+	// non-nil, empty slice for this, which is the "scoped to nothing" state.
+	m := &fakeMinter{key: key, bodies: map[string]map[string]any{
+		"alice": {
+			"iss": "https://minter.test", "sub": "user:alice", "aud": []any{"garm"},
+			"jti": "t-alice", "iat": now.Unix(), "exp": now.Add(time.Hour).Unix(),
+			"garm": map[string]any{
+				"clearance": "CLEARANCE_RESTRICTED", "compartments": []any{"support"},
+				"verbs": []any{"READ"}, "kind": "USER", "tool_sets": []any{"alpha"},
+			},
+			"act": map[string]any{
+				"sub": "agent:bot",
+				"garm": map[string]any{
+					"clearance": "CLEARANCE_RESTRICTED", "compartments": []any{"support"},
+					"verbs": []any{"READ"}, "kind": "AGENT", "tool_sets": []any{"beta"},
+				},
+			},
+		},
+	}}
+	s := &conformance.Suite{
+		Issuer: "https://minter.test", Audience: "garm",
+		Compartments: []string{"support"},
+		Cases: []conformance.Case{{
+			Name: "disjoint scopes fold to nothing", Mint: map[string]string{"user": "alice"},
+			Expect: &conformance.Expect{
+				Subject: "user:alice", Actor: "agent:bot",
+				Clearance:    "CLEARANCE_RESTRICTED",
+				Compartments: []string{"support"}, Verbs: []string{"VERB_READ"},
+				ToolSets: &[]string{}, // non-nil, empty: "scoped to nothing"
+			},
+		}},
+	}
+
+	res, _ := conformance.Run(context.Background(), s, m, jwksFor(t, key))
+	if res[0].Err != nil {
+		t.Fatalf("a principal correctly scoped to nothing failed that expectation: %v", res[0].Err)
+	}
+}
+
+// This is the case the pre-fix diffSets could not express: an unscoped
+// principal (nil) is NOT the same thing as one scoped to nothing (non-nil,
+// empty), and a suite that expects the latter must catch the former.
+func TestRunCatchesUnscopedWhenScopedToNothingWasExpected(t *testing.T) {
+	now := time.Now()
+	key := newECKey(t)
+	m := &fakeMinter{key: key, bodies: map[string]map[string]any{
+		// No tool_sets claim: the fold leaves ToolSets nil (unscoped).
+		"alice": body(now, "user:alice", "CLEARANCE_PUBLIC", nil, []any{"READ"}, nil),
+	}}
+	s := &conformance.Suite{
+		Issuer: "https://minter.test", Audience: "garm",
+		Compartments: []string{"support"},
+		Cases: []conformance.Case{{
+			Name: "unscoped is not scoped-to-nothing", Mint: map[string]string{"user": "alice"},
+			Expect: &conformance.Expect{
+				Subject: "user:alice", Clearance: "CLEARANCE_PUBLIC",
+				Verbs:    []string{"VERB_READ"},
+				ToolSets: &[]string{}, // demands "scoped to nothing"
+			},
+		}},
+	}
+
+	res, _ := conformance.Run(context.Background(), s, m, jwksFor(t, key))
+	if res[0].Err == nil {
+		t.Fatal("an unscoped principal passed a case that demanded scoped-to-nothing")
+	}
+	if !strings.Contains(res[0].Err.Error(), "toolSets") {
+		t.Fatalf("the error must name toolSets as the field that disagreed: %v", res[0].Err)
+	}
+}
+
+// Fix round 1, Finding 2. The `verifying:` error path had no coverage: every
+// prior test fed the verifier a token that verified fine and only disagreed
+// in the fold. A token signed by a key the JWKS does not serve must fail
+// verification itself, distinctly attributed from a mint error.
+func TestRunAttributesAVerificationFailureDistinctlyFromAMintError(t *testing.T) {
+	now := time.Now()
+	servedKey := newECKey(t)  // what the JWKS endpoint serves
+	signingKey := newECKey(t) // what actually signs the token — a different key
+	m := &fakeMinter{key: signingKey, bodies: map[string]map[string]any{
+		"alice": body(now, "user:alice", "CLEARANCE_PUBLIC", nil, []any{"READ"}, nil),
+	}}
+	s := &conformance.Suite{
+		Issuer: "https://minter.test", Audience: "garm",
+		Compartments: []string{"support"},
+		Cases: []conformance.Case{{
+			Name: "wrong signing key", Mint: map[string]string{"user": "alice"},
+			Expect: &conformance.Expect{Subject: "user:alice", Clearance: "CLEARANCE_PUBLIC"},
+		}},
+	}
+
+	res, err := conformance.Run(context.Background(), s, m, jwksFor(t, servedKey))
+	if err != nil {
+		t.Fatalf("a verification failure is a case failure, not a run failure: %v", err)
+	}
+	if res[0].Err == nil {
+		t.Fatal("a token signed by a key absent from the JWKS was verified anyway")
+	}
+	if !strings.Contains(res[0].Err.Error(), "verifying:") {
+		t.Fatalf("the error must be attributed to verification, not minting: %v", res[0].Err)
+	}
+	if strings.Contains(res[0].Err.Error(), "minting:") {
+		t.Fatalf("a verification failure must not be mislabelled as a mint error: %v", res[0].Err)
+	}
+}
