@@ -145,8 +145,9 @@ func (v *Verifier) checkRegistered(c *Claims, raw map[string]any) error {
 	if !slices.Contains(v.cfg.Issuers, c.Issuer) {
 		return fmt.Errorf("authn: issuer %q is not allowed", c.Issuer)
 	}
-	if c.Audience != v.cfg.Audience {
-		return fmt.Errorf("authn: token audience %q is not %q", c.Audience, v.cfg.Audience)
+	if !slices.Contains(c.Audience, v.cfg.Audience) {
+		return fmt.Errorf("authn: token audience %q does not include %q",
+			c.Audience, v.cfg.Audience)
 	}
 
 	now := v.cfg.Now()

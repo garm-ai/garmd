@@ -149,18 +149,56 @@ wider — and it fails silently, which is the objectionable half.
 tool-list panel needs the catalogue service and reports that it cannot reach
 garm until then.
 
-## Drift with devkit is not caught
+## Drift with devkit is caught, for the personas devkit.json covers
 
 `garm-ai/devkit` mints the dev tokens this verifier reads, and neither may
 import the other: a module that can assert any identity must not be in the
 dependency graph of one that decides what an identity may do. CI asserts it
 from both sides.
 
-Nothing currently fails if the token body and the verifier disagree. In the
-monorepo one test minted and verified in a single process; that test is split,
-and the seam between the halves is unguarded. The intended fix is a
-cross-repository CI check — clone devkit, mint, assert the `Principal` — which
-keeps it caught with no build edge either way. It is not built.
+The seam between minting and verifying is a cross-repository CI check now,
+not a same-process test. `internal/conformance` loads a suite of cases from
+`spec/conformance/identity/devkit.json`, drives the running devkit IdP over
+HTTP to mint a token per case, verifies it with this repository's own
+`internal/authn`, and asserts the resulting `Principal` against the case's
+expectation. The `conformance` job in `.github/workflows/ci.yml` starts the
+dev IdP, runs that suite, and fails the build on any disagreement — with no
+build-time edge between the two repositories: devkit is `checkout`'d and run
+as a process, never imported, and a dedicated step re-asserts `go list -deps
+-test ./...` never names `garm-ai/devkit`.
+
+What remains unguarded, in four parts:
+
+**The suite covers the five personas in `devkit.json` and no others**, so a
+claim shape only a different persona would exercise is still unchecked.
+
+**The job cannot run on pull requests from forks.** `garmd` is public and
+`spec` is private, so the private checkout needs a secret and a fork PR is
+handed none. The job carries an `if` that skips it there rather than failing
+the checkout with a permissions error that would read like a bug in the
+contributor's change. Drift is therefore caught for maintainers and not for
+outside contributors: a first-party push or PR is the only place this check
+runs.
+
+**The `aud` array form — the bug this branch fixes — is never exercised by
+the drift check.** `devkit` mints `aud` as a bare string, so every token the
+conformance run sees carries the scalar form. A green conformance run is
+therefore NOT evidence that the array-form audience fix works; the only thing
+covering it is the audience table in `internal/authn/verify_test.go`, which
+drives the verifier directly with `aud` as a string, as an array containing
+the audience, as an array not containing it, and absent. Closing this would
+mean devkit gaining a way to mint the array form and the suite gaining a case
+that asks for it.
+
+**The compartment vocabulary is the suite's own declaration, not a real
+catalogue.** `internal/conformance.Run` builds the `policy.Registry` from
+`s.Compartments` — the list in `devkit.json` — so the `dropped` assertions
+prove the verifier drops a name the SUITE does not declare, not one no
+deployed catalogue declares. The design record lists "the compartment
+vocabulary against a real catalogue" among the gaps this job closes; that one
+is not closed. What would close it is checking both sides against a built
+catalogue — the `garm claims check --against` shape — rather than against a
+vocabulary the suite asserts about itself.
 
 ## Coverage
 

@@ -170,6 +170,43 @@ func TestVerifyRejectsAudienceMismatch(t *testing.T) {
 	}
 }
 
+func TestVerifyAudienceForms(t *testing.T) {
+	now := time.Now()
+
+	for _, tc := range []struct {
+		name   string
+		aud    any
+		accept bool
+	}{
+		{"bare string, matching", "garm", true},
+		{"single-element array", []any{"garm"}, true},
+		{"array, match first", []any{"garm", "other"}, true},
+		{"array, match NOT first", []any{"other", "garm"}, true},
+		{"array, no match", []any{"other", "another"}, false},
+		{"empty array", []any{}, false},
+		{"bare string, not matching", "other", false},
+		{"absent", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, key, _ := harness(t, now)
+			body := goodBody(now)
+			if tc.aud == nil {
+				delete(body, "aud")
+			} else {
+				body["aud"] = tc.aud
+			}
+
+			_, _, err := v.Verify(context.Background(), sign(t, key, "k1", body))
+			if tc.accept && err != nil {
+				t.Fatalf("rejected an acceptable audience %v: %v", tc.aud, err)
+			}
+			if !tc.accept && err == nil {
+				t.Fatalf("accepted audience %v, which does not contain %q", tc.aud, "garm")
+			}
+		})
+	}
+}
+
 func TestVerifyRejectsAnIssuerNotInTheAllowlist(t *testing.T) {
 	now := time.Now()
 	v, key, _ := harness(t, now)
