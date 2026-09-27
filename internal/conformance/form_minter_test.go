@@ -98,6 +98,17 @@ func TestFormMinterToken(t *testing.T) {
 		body       string
 		wantToken  string
 		wantRefuse bool
+
+		// wantErr covers the two edge paths that are neither a success nor a
+		// RefusalError: a 200 whose body will not decode as JSON, and a 200
+		// that decodes but carries no access_token. Both must produce an
+		// ordinary error (never a *RefusalError — the suite's mintError
+		// assertion depends on that split holding here too) and an empty
+		// token.
+		wantErr bool
+		// wantErrBodyPart, when set, pins that the error names the response
+		// body — Finding 1: the malformed-JSON path used to drop it.
+		wantErrBodyPart string
 	}{
 		{
 			name:      "200 with a JSON body returns access_token",
@@ -110,6 +121,19 @@ func TestFormMinterToken(t *testing.T) {
 			status:     http.StatusForbidden,
 			body:       `{"error":"invalid_client","error_description":"unknown client id"}`,
 			wantRefuse: true,
+		},
+		{
+			name:            "200 with a body that will not decode as JSON is an error naming the body, not a refusal",
+			status:          http.StatusOK,
+			body:            `<html><body>502 Bad Gateway</body></html>`,
+			wantErr:         true,
+			wantErrBodyPart: "502 Bad Gateway",
+		},
+		{
+			name:    "200 with valid JSON but no access_token is an error, not a refusal",
+			status:  http.StatusOK,
+			body:    `{"issued_token_type":"urn:ietf:params:oauth:token-type:jwt","token_type":"N_A"}`,
+			wantErr: true,
 		},
 	}
 
@@ -132,7 +156,8 @@ func TestFormMinterToken(t *testing.T) {
 			}
 
 			tok, err := m.Token(context.Background(), map[string]string{"user": "alice"})
-			if tt.wantRefuse {
+			switch {
+			case tt.wantRefuse:
 				if err == nil {
 					t.Fatalf("status %d produced no error", tt.status)
 				}
@@ -146,13 +171,29 @@ func TestFormMinterToken(t *testing.T) {
 				if !strings.Contains(refusal.Body, "invalid_client") {
 					t.Fatalf("refusal must carry the minter's reason, got %q", refusal.Body)
 				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tok != tt.wantToken {
-				t.Fatalf("got token %q want %q", tok, tt.wantToken)
+			case tt.wantErr:
+				if err == nil {
+					t.Fatalf("body %q produced no error; a later change that treated this as success "+
+						"would pass this suite and only fail downstream, in verification", tt.body)
+				}
+				var refusal *conformance.RefusalError
+				if errors.As(err, &refusal) {
+					t.Fatalf("a malformed 200 response was reported as a refusal, got %T: %v", err, err)
+				}
+				if tok != "" {
+					t.Fatalf("got token %q on an error path, want empty", tok)
+				}
+				if tt.wantErrBodyPart != "" && !strings.Contains(err.Error(), tt.wantErrBodyPart) {
+					t.Fatalf("error must name the response body (want it to contain %q), got: %v",
+						tt.wantErrBodyPart, err)
+				}
+			default:
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tok != tt.wantToken {
+					t.Fatalf("got token %q want %q", tok, tt.wantToken)
+				}
 			}
 		})
 	}

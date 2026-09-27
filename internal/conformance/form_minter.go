@@ -167,10 +167,27 @@ func (m FormMinter) Token(ctx context.Context, params map[string]string) (string
 
 	var tr tokenResponse
 	if err := json.Unmarshal(b, &tr); err != nil {
-		return "", fmt.Errorf("conformance: decoding token response: %w", err)
+		return "", fmt.Errorf("conformance: decoding token response: %w (body: %s)", err, truncateBody(b))
 	}
 	if tr.AccessToken == "" {
-		return "", fmt.Errorf("conformance: token response has no access_token: %s", strings.TrimSpace(string(b)))
+		return "", fmt.Errorf("conformance: token response has no access_token (body: %s)", truncateBody(b))
 	}
 	return tr.AccessToken, nil
+}
+
+// truncateBody bounds a response body for inclusion in an error message. A
+// 200 that fails to decode is exactly the case where an operator needs to
+// see what actually came back — an HTML error page from a misconfigured
+// proxy, a gateway message, an empty body — and a conformance job is
+// normally read at a distance, from CI output, with no chance to reproduce
+// locally. A few hundred bytes is plenty to recognise any of those; it says
+// so explicitly when it cuts something off, rather than leaving a truncated
+// blob that reads as the whole answer.
+func truncateBody(b []byte) string {
+	const max = 500
+	s := strings.TrimSpace(string(b))
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "... (truncated)"
 }
