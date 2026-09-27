@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,8 +20,28 @@ import (
 // Minter is a thing that hands out tokens. It is an interface so the runner
 // is testable in process; the only production implementation is HTTPMinter,
 // because an import would defeat the boundary.
+//
+// A Minter that REFUSES must say so with a *RefusalError. Any other error
+// means the minter did not answer, which is a different fact entirely — see
+// RefusalError.
 type Minter interface {
 	Token(ctx context.Context, params map[string]string) (string, error)
+}
+
+// RefusalError is a minter that answered and said no.
+//
+// It is a distinct type because `mintError` on a case asserts that the minter
+// REFUSED — an entitlement it enforces — and "could not be reached" is not
+// "said no". Without the distinction, a suite of nothing but `mintError`
+// cases pointed at a dead port reports ok while checking nothing, which is
+// the exact failure this package exists to prevent.
+type RefusalError struct {
+	Status int
+	Body   string
+}
+
+func (e *RefusalError) Error() string {
+	return fmt.Sprintf("minter returned %d: %s", e.Status, e.Body)
 }
 
 // HTTPMinter asks a minter over loopback. A non-200 is an error, never an
@@ -54,8 +75,13 @@ func (m HTTPMinter) Token(ctx context.Context, params map[string]string) (string
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("minter returned %d: %s",
-			resp.StatusCode, strings.TrimSpace(string(b)))
+		// A refusal: the minter was reached and declined. Transport
+		// failures above stay ordinary wrapped errors, so the two can
+		// never be confused by a case asserting mintError.
+		return "", &RefusalError{
+			Status: resp.StatusCode,
+			Body:   strings.TrimSpace(string(b)),
+		}
 	}
 	return strings.TrimSpace(string(b)), nil
 }
@@ -101,6 +127,15 @@ func runCase(ctx context.Context, c Case, m Minter, v *authn.Verifier, reg *poli
 		if mintErr == nil {
 			return fmt.Errorf("the minter granted this, but the suite says it must refuse")
 		}
+		// Only a refusal satisfies the assertion. A dead port, a DNS
+		// failure or a timeout all produce a non-nil error too, and
+		// accepting those would turn "delegation is refused" into
+		// "something went wrong", which any broken setup satisfies.
+		var refusal *RefusalError
+		if !errors.As(mintErr, &refusal) {
+			return fmt.Errorf("the suite says the minter must refuse this, but the minter "+
+				"could not be reached at all — that asserts nothing: %w", mintErr)
+		}
 		return nil
 	}
 	if mintErr != nil {
@@ -118,12 +153,20 @@ func runCase(ctx context.Context, c Case, m Minter, v *authn.Verifier, reg *poli
 // shape that has drifted usually moves more than one.
 func compare(e *Expect, p *toolplane.Principal, dropped []string, reg *policy.Registry) error {
 	var bad []string
-	if e.Subject != "" && p.Subject != e.Subject {
+	// Unconditional, like every other field here: LoadSuite requires
+	// `subject`, so an omitted one is a malformed suite rather than a
+	// silent "assert nothing".
+	if p.Subject != e.Subject {
 		bad = append(bad, fmt.Sprintf("subject: got %q want %q", p.Subject, e.Subject))
 	}
 	if p.Actor != e.Actor {
 		bad = append(bad, fmt.Sprintf("actor: got %q want %q", p.Actor, e.Actor))
 	}
+	// Kind is the one field left optional, and deliberately: it is
+	// attribution rather than authority, so a suite that does not name it is
+	// making a legitimate choice, not losing an assertion it meant to make.
+	// Every other field above and below is asserted whether the case names
+	// it or not.
 	if e.Kind != "" && p.Kind.String() != e.Kind {
 		bad = append(bad, fmt.Sprintf("kind: got %s want %s", p.Kind, e.Kind))
 	}
@@ -189,14 +232,24 @@ func diffToolSets(got []string, want *[]string) string {
 	}
 }
 
+// verbNames spells out every verb the set holds.
+//
+// It reads the generated enum rather than a hand-written list: a fourth verb
+// added upstream would otherwise be invisible here, and a minter granting it
+// against a verifier folding it would agree silently — the harness reporting
+// ok about a field it cannot see. VERB_UNSPECIFIED is skipped because it is
+// the zero value, not a grant, and the result is sorted so a map's iteration
+// order cannot make a passing case flap.
 func verbNames(vs toolplane.VerbSet) []string {
 	var out []string
-	for _, v := range []toolv1.Verb{
-		toolv1.Verb_VERB_READ, toolv1.Verb_VERB_WRITE, toolv1.Verb_VERB_DESTRUCTIVE,
-	} {
-		if vs.Has(v) {
-			out = append(out, v.String())
+	for code, name := range toolv1.Verb_name {
+		if toolv1.Verb(code) == toolv1.Verb_VERB_UNSPECIFIED {
+			continue
+		}
+		if vs.Has(toolv1.Verb(code)) {
+			out = append(out, name)
 		}
 	}
+	slices.Sort(out)
 	return out
 }
