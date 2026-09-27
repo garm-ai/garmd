@@ -52,18 +52,18 @@ func TestLoadSuiteReadsAValidFile(t *testing.T) {
 
 func TestLoadSuiteRejectsMalformedSuites(t *testing.T) {
 	for name, body := range map[string]string{
-		"no issuer":   `{"audience":"garm","compartments":["a"],"cases":[{"name":"x","expect":{"clearance":"CLEARANCE_PUBLIC"}}]}`,
-		"no audience": `{"issuer":"i","compartments":["a"],"cases":[{"name":"x","expect":{"clearance":"CLEARANCE_PUBLIC"}}]}`,
+		"no issuer":   `{"audience":"garm","compartments":["a"],"cases":[{"name":"x","mint":{"user":"x"},"expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC"}}]}`,
+		"no audience": `{"issuer":"i","compartments":["a"],"cases":[{"name":"x","mint":{"user":"x"},"expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC"}}]}`,
 		"no cases":    `{"issuer":"i","audience":"garm","compartments":["a"],"cases":[]}`,
 		"unnamed case": `{"issuer":"i","audience":"garm","compartments":["a"],
-		                 "cases":[{"expect":{"clearance":"CLEARANCE_PUBLIC"}}]}`,
+		                 "cases":[{"mint":{"user":"x"},"expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC"}}]}`,
 		"neither expect nor mintError": `{"issuer":"i","audience":"garm","compartments":["a"],
-		                                 "cases":[{"name":"x"}]}`,
+		                                 "cases":[{"name":"x","mint":{"user":"x"}}]}`,
 		"both expect and mintError": `{"issuer":"i","audience":"garm","compartments":["a"],
-		                              "cases":[{"name":"x","mintError":true,
-		                                        "expect":{"clearance":"CLEARANCE_PUBLIC"}}]}`,
+		                              "cases":[{"name":"x","mint":{"user":"x"},"mintError":true,
+		                                        "expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC"}}]}`,
 		"expect with no clearance": `{"issuer":"i","audience":"garm","compartments":["a"],
-		                             "cases":[{"name":"x","expect":{"subject":"s"}}]}`,
+		                             "cases":[{"name":"x","mint":{"user":"x"},"expect":{"subject":"s"}}]}`,
 	} {
 		if _, err := conformance.LoadSuite(write(t, body)); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -76,8 +76,9 @@ func TestLoadSuiteRejectsMalformedSuites(t *testing.T) {
 // it — so the suite would pass by agreeing with its own mistake.
 func TestLoadSuiteRejectsAnExpectedCompartmentItDoesNotDeclare(t *testing.T) {
 	body := `{"issuer":"i","audience":"garm","compartments":["support"],
-	          "cases":[{"name":"x","expect":{"clearance":"CLEARANCE_PUBLIC",
-	                                         "compartments":["support","financial"]}}]}`
+	          "cases":[{"name":"x","mint":{"user":"x"},
+	                    "expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC",
+	                              "compartments":["support","financial"]}}]}`
 	_, err := conformance.LoadSuite(write(t, body))
 	if err == nil {
 		t.Fatal("accepted a suite expecting an undeclared compartment")
@@ -91,9 +92,53 @@ func TestLoadSuiteRejectsAnExpectedCompartmentItDoesNotDeclare(t *testing.T) {
 // not have been dropped.
 func TestLoadSuiteRejectsADroppedCompartmentItDeclares(t *testing.T) {
 	body := `{"issuer":"i","audience":"garm","compartments":["support"],
-	          "cases":[{"name":"x","expect":{"clearance":"CLEARANCE_PUBLIC",
-	                                         "dropped":["support"]}}]}`
+	          "cases":[{"name":"x","mint":{"user":"x"},
+	                    "expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC",
+	                              "dropped":["support"]}}]}`
 	if _, err := conformance.LoadSuite(write(t, body)); err == nil {
 		t.Fatal("accepted a suite expecting a declared compartment to be dropped")
+	}
+}
+
+// Fix round 2, minor 5. A case that lost its `mint` block still calls the
+// minter, and a minter handed no parameters answers with whatever it
+// defaults to — so the case fails, or worse passes, on something other than
+// the persona it names.
+func TestLoadSuiteRejectsACaseThatAsksTheMinterForNothing(t *testing.T) {
+	for name, body := range map[string]string{
+		"mint absent": `{"issuer":"i","audience":"garm","compartments":["support"],
+		                 "cases":[{"name":"x","expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC"}}]}`,
+		"mint empty": `{"issuer":"i","audience":"garm","compartments":["support"],
+		                "cases":[{"name":"x","mint":{},
+		                          "expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC"}}]}`,
+		// The rule holds for mintError cases too: a refusal is only
+		// meaningful about a request that was actually made.
+		"mint absent on a mintError case": `{"issuer":"i","audience":"garm","compartments":["support"],
+		                                     "cases":[{"name":"x","mintError":true}]}`,
+	} {
+		_, err := conformance.LoadSuite(write(t, body))
+		if err == nil {
+			t.Errorf("%s: accepted a case that asks the minter for nothing", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "minter for nothing") {
+			t.Errorf("%s: the error must say the case asks for nothing, got: %v", name, err)
+		}
+	}
+}
+
+// Fix round 2, minor 7. `subject` is required for the same reason
+// `clearance` is: compare asserts it unconditionally, so a case that omits
+// one would pass for any identity the minter happened to return.
+func TestLoadSuiteRejectsAnExpectationWithNoSubject(t *testing.T) {
+	body := `{"issuer":"i","audience":"garm","compartments":["support"],
+	          "cases":[{"name":"x","mint":{"user":"x"},
+	                    "expect":{"clearance":"CLEARANCE_PUBLIC"}}]}`
+	_, err := conformance.LoadSuite(write(t, body))
+	if err == nil {
+		t.Fatal("accepted an expectation that names no subject")
+	}
+	if !strings.Contains(err.Error(), "subject") {
+		t.Fatalf("the error must name subject as what is missing, got: %v", err)
 	}
 }

@@ -35,7 +35,8 @@ type Case struct {
 
 	// Mint is the query the minter is asked, verbatim. Keeping it opaque is
 	// what lets one suite format serve minters with different request
-	// shapes.
+	// shapes. It is required and must be non-empty: a minter asked for
+	// nothing answers with whatever it defaults to.
 	Mint map[string]string `json:"mint"`
 
 	// Expect is the Principal the fold must produce. Exactly one of Expect
@@ -104,6 +105,12 @@ func LoadSuite(path string) (*Suite, error) {
 		if c.Name == "" {
 			return nil, fmt.Errorf("conformance: %s: case %d has no name", path, i)
 		}
+		if len(c.Mint) == 0 {
+			return nil, fmt.Errorf("conformance: %s: case %q asks the minter for nothing; "+
+				"a minter handed no parameters mints whatever it defaults to, "+
+				"so the case would pass or fail on something other than its subject",
+				path, c.Name)
+		}
 		if (c.Expect == nil) == !c.MintError {
 			return nil, fmt.Errorf("conformance: %s: case %q must set exactly one of expect and mintError",
 				path, c.Name)
@@ -114,6 +121,15 @@ func LoadSuite(path string) (*Suite, error) {
 		if c.Expect.Clearance == "" {
 			return nil, fmt.Errorf("conformance: %s: case %q expects no clearance; "+
 				"a fold always produces one", path, c.Name)
+		}
+		// Same reasoning as clearance: a fold always produces a subject, so
+		// a case that names none is not asserting "any subject" — it is
+		// asserting nothing, and compare would pass it whoever the token
+		// turned out to be.
+		if c.Expect.Subject == "" {
+			return nil, fmt.Errorf("conformance: %s: case %q expects no subject; "+
+				"a fold always produces one, and a case that omits it would pass "+
+				"for any identity", path, c.Name)
 		}
 		for _, name := range c.Expect.Compartments {
 			if !slices.Contains(s.Compartments, name) {
