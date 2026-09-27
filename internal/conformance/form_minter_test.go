@@ -340,3 +340,131 @@ func TestFormMinterUsesAFreshJTIPerCall(t *testing.T) {
 		t.Fatalf("two successive calls carried the same jti (%v); a replayed jti is refused by the service under test", jti1)
 	}
 }
+
+// TestFormMinterFetchesSubjectTokenFromUpstream pins the two-step: a case
+// carrying subject_user causes a GET to UpstreamURL first, and the raw body
+// that comes back is sent to the STS as subject_token — never as
+// subject_user, and never as subject_tenant, which name nothing the STS's
+// exchange reads.
+func TestFormMinterFetchesSubjectTokenFromUpstream(t *testing.T) {
+	var upstreamRequest *http.Request
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamRequest = r
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprint(w, "upstream-issued-subject-token\n") // devkit trims a trailing newline too
+	}))
+	t.Cleanup(upstream.Close)
+
+	var stsForm url.Values
+	sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("request body was not form-encoded: %v", err)
+		}
+		stsForm = r.Form
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_token":"delegation-token"}`)
+	}))
+	t.Cleanup(sts.Close)
+
+	_, pemBytes := newFormMinterKey(t)
+	key, err := conformance.ParseECPrivateKeyPEM(pemBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := conformance.FormMinter{
+		BaseURL: sts.URL, ClientID: "client-1", Audience: "https://sts.test/token", Key: key,
+		UpstreamURL: upstream.URL,
+	}
+
+	tok, err := m.Token(context.Background(), map[string]string{
+		"grant_type":     "urn:ietf:params:oauth:grant-type:token-exchange",
+		"agent":          "order-assistant",
+		"subject_user":   "C",
+		"subject_tenant": "acme",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != "delegation-token" {
+		t.Fatalf("got token %q want %q", tok, "delegation-token")
+	}
+
+	if upstreamRequest == nil {
+		t.Fatal("no request reached the upstream IdP")
+	}
+	if upstreamRequest.Method != http.MethodGet {
+		t.Fatalf("upstream fetch used %s, want GET", upstreamRequest.Method)
+	}
+	if got := upstreamRequest.URL.Query().Get("sub"); got != "C" {
+		t.Fatalf("upstream fetch sub = %q, want %q", got, "C")
+	}
+	if got := upstreamRequest.URL.Query().Get("tenant"); got != "acme" {
+		t.Fatalf("upstream fetch tenant = %q, want %q", got, "acme")
+	}
+
+	if got := stsForm.Get("subject_token"); got != "upstream-issued-subject-token" {
+		t.Fatalf("subject_token posted to the STS = %q, want the upstream's raw body", got)
+	}
+	if stsForm.Get("subject_user") != "" {
+		t.Fatal("subject_user was forwarded to the STS as a form field; it must be consumed, not sent")
+	}
+	if stsForm.Get("subject_tenant") != "" {
+		t.Fatal("subject_tenant was forwarded to the STS as a form field; it must be consumed, not sent")
+	}
+	if stsForm.Get("agent") != "order-assistant" {
+		t.Fatalf("an ordinary mint param (agent) was not carried through, got form %v", stsForm)
+	}
+}
+
+// TestFormMinterSubjectUserWithoutUpstreamURLFails is the fail-outright
+// contract: a case that asks for the two-step gets one, or an error — never
+// a silent one-step degrade that would forward subject_user itself and let
+// the STS refuse for a reason that has nothing to do with the case.
+func TestFormMinterSubjectUserWithoutUpstreamURLFails(t *testing.T) {
+	_, pemBytes := newFormMinterKey(t)
+	key, err := conformance.ParseECPrivateKeyPEM(pemBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := conformance.FormMinter{BaseURL: "http://127.0.0.1:1", ClientID: "client-1", Audience: "https://sts.test/token", Key: key}
+
+	_, err = m.Token(context.Background(), map[string]string{"subject_user": "C"})
+	if err == nil {
+		t.Fatal("subject_user with no UpstreamURL configured produced no error")
+	}
+	if !strings.Contains(err.Error(), "UpstreamURL") {
+		t.Fatalf("error must say UpstreamURL is missing, got: %v", err)
+	}
+}
+
+// TestFormMinterSubjectTokenFetchFailureIsNotARefusal is the same contract
+// TestFormMinterDoesNotReportAConnectionFailureAsARefusal pins for the STS
+// itself, one hop earlier: a subject-token fetch that fails — here, the
+// upstream IdP answering with an error — must never surface as a
+// *RefusalError, or a suite of nothing but mintError cases pointed at a
+// broken upstream would report ok while checking nothing.
+func TestFormMinterSubjectTokenFetchFailureIsNotARefusal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no such persona", http.StatusNotFound)
+	}))
+	t.Cleanup(upstream.Close)
+
+	_, pemBytes := newFormMinterKey(t)
+	key, err := conformance.ParseECPrivateKeyPEM(pemBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := conformance.FormMinter{
+		BaseURL: "http://127.0.0.1:1", ClientID: "client-1", Audience: "https://sts.test/token", Key: key,
+		UpstreamURL: upstream.URL,
+	}
+
+	_, err = m.Token(context.Background(), map[string]string{"subject_user": "nobody"})
+	if err == nil {
+		t.Fatal("a 404 from the upstream IdP produced no error")
+	}
+	var refusal *conformance.RefusalError
+	if errors.As(err, &refusal) {
+		t.Fatalf("an upstream IdP failure was reported as a *RefusalError, which must mean the STS refused: %v", err)
+	}
+}

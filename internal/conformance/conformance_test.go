@@ -22,6 +22,8 @@ var (
 	clientID    = flag.String("client-id", "", "client id (form minter only)")
 	clientKey   = flag.String("client-key", "", "path to a PEM-encoded EC private key (form minter only)")
 	tokenEndAud = flag.String("token-endpoint-aud", "", "audience the client_assertion must name (form minter only)")
+	upstreamIDP = flag.String("upstream-idp", "", "base URL of an upstream IdP to fetch subject tokens from, "+
+		"for cases carrying subject_user (form minter only; optional)")
 )
 
 // buildMinter selects a Minter from -minter, and fails outright — never
@@ -47,10 +49,11 @@ func buildMinter(t *testing.T) conformance.Minter {
 			t.Fatal(err)
 		}
 		return conformance.FormMinter{
-			BaseURL:  *idpURL,
-			ClientID: *clientID,
-			Audience: *tokenEndAud,
-			Key:      key,
+			BaseURL:     *idpURL,
+			ClientID:    *clientID,
+			Audience:    *tokenEndAud,
+			Key:         key,
+			UpstreamURL: *upstreamIDP,
 		}
 	default:
 		t.Fatalf("-minter=%q is not a recognized minter shape; want get|form", *minterKind)
