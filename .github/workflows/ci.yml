@@ -101,6 +101,14 @@ jobs:
   conformance:
     name: identity conformance (devkit)
     runs-on: ubuntu-latest
+    # Skipped on PRs from forks, and skipped deliberately. The `spec`
+    # checkout below needs a secret; a fork PR is handed none, so the job
+    # would run, substitute `github.token`, and fail the private checkout
+    # with a permissions error that reads like a bug in the contributor's
+    # change. A skipped job is honest about what was not checked. A
+    # permanently red one on every outside PR teaches people to ignore red
+    # CI, which costs more than this job is worth.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v5
         with:
@@ -124,7 +132,12 @@ jobs:
       #
       # spec is a private repository, so this job requires a GARM_CI_TOKEN
       # secret with read access to it. Because garmd is public, PRs from
-      # forks cannot access secrets, so this job will not run on them.
+      # forks are handed no secrets — which is why the job-level `if` above
+      # skips them outright. Without that guard the secret would resolve
+      # empty, `github.token` would be substituted, and this step would fail
+      # with a permissions error indistinguishable from a real one. Drift is
+      # therefore caught for maintainers and not for outside contributors;
+      # KNOWN-GAPS.md says so.
       - uses: actions/checkout@v5
         with:
           repository: garm-ai/spec
@@ -172,12 +185,34 @@ jobs:
       - name: assert no dependency on a minter
         working-directory: garmd
         run: |
-          deps=$(go list -deps -test ./...)
-          if [ -z "$deps" ]; then
-            echo "go list produced no dependency output at all; that is a broken check, not a clean one" >&2
-            exit 1
-          fi
-          if echo "$deps" | grep -q 'garm-ai/devkit'; then
-            echo "garmd has acquired a dependency on a token minter" >&2
-            exit 1
-          fi
+          # BOTH build configurations, because a build tag hides an import
+          # from `go list` completely. conformance_test.go is
+          # //go:build conformance — the single file in this repository most
+          # likely to reach for a minter — and an untagged list does not see
+          # it at all:
+          #
+          #   go list -f '{{.XTestGoFiles}}' ./internal/conformance/
+          #     [run_test.go suite_test.go]
+          #   go list -tags conformance -f '{{.XTestGoFiles}}' ./internal/conformance/
+          #     [conformance_test.go run_test.go suite_test.go]
+          #
+          # The constraint is "not in go.mod, not in a _test.go import, not
+          # behind a build tag", so the check has to be run once per tag set.
+          for tags in "" "conformance"; do
+            # The assignment on its own line is the real protection here: a
+            # `go list` that fails inside an `if` condition is swallowed and
+            # reads as a clean check, where under errexit a failing
+            # assignment aborts the step. The empty-output guard below
+            # covers the remaining case — a `go list` that succeeds but
+            # prints nothing is broken, not clean.
+            deps=$(go list -tags "$tags" -deps -test ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -q 'garm-ai/devkit'; then
+              echo "::error::garmd has acquired a dependency on a token minter (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "clean: no minter in the dependency graph, untagged or under -tags conformance"
