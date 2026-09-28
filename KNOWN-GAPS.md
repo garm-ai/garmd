@@ -41,6 +41,14 @@
   the previous verdict standing.
 - `internal/authn` — step 1. JWT over a cached JWKS, issuer and audience
   allowlists, and delegation folding that can only narrow.
+- **The compartment taxonomy follows the catalogue.** `authn.Swappable` holds
+  it behind an atomic pointer; a reload that loads, mounts and prepares swaps it
+  in, and the next token verified resolves against the new generation's
+  declarations. A name no generation declares is still dropped rather than
+  refused, because an IdP-side typo must cost that caller that compartment and
+  not the whole token. The holder is in place and read on every verification;
+  nothing calls `Set` yet — wiring the reload to it is a later task, so today
+  it serves the boot generation for the life of the process.
 - `internal/record` — where an event goes. Its SHAPE is in the contract,
   because a tool call and a generation call must produce one record type.
 - `internal/record/jetstream` — the ledger, batched onto `GARM_LEDGER`.
@@ -97,9 +105,10 @@ The refusal names the tool.
 reload (Task 10) that lengthens a ceiling, or that introduces the first gated
 tool into a process started without one, does not re-derive or re-check it: the
 bucket keeps the expiry it was created with until a restart, and a grant longer
-than that expiry is replayable in the gap. The same shape as the verifier's
-compartment registry, further down this file: derived from the boot catalogue
-and not revisited.
+than that expiry is replayable in the gap. The verifier's compartment taxonomy
+had the same shape and no longer does — `authn.Swappable`, in the "Built" list
+above — so this bucket is now the one place a boot-derived value is not
+revisited.
 
 A presented approval that is not good for this call — wrong tool, wrong
 subject, too old, already spent, material that differs from what was approved —
@@ -201,12 +210,6 @@ ledgered — and a contract mismatch in production is exactly the event someone
 will later want a row for. Wiring the reconciler in as the chain's
 `AvailabilitySource` would fix it; the two checks would then need deciding
 between rather than both existing.
-
-**The verifier's compartment registry is built once, at boot.** It comes from
-the catalogue, so a reload that ADDS a compartment does not reach the
-verifier: tokens asserting the new name have it dropped, and callers lose
-authority until a restart. It fails in the safe direction — narrower, never
-wider — and it fails silently, which is the objectionable half.
 
 **No MCP surface, no catalogue service, no second listener.** The dev IdP's
 tool-list panel needs the catalogue service and reports that it cannot reach

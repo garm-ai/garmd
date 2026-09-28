@@ -48,8 +48,17 @@ type Config struct {
 	Audience string
 
 	// Compartments is the taxonomy the token's compartment names resolve
-	// against. Required.
+	// against. Required unless CompartmentSource is set.
 	Compartments *policy.Registry
+
+	// CompartmentSource, when set, REPLACES Compartments and is read once per
+	// verification — so a catalogue reload that declares a new compartment
+	// reaches the next token rather than the next restart.
+	//
+	// Both exist because most callers have one fixed taxonomy (every test
+	// here, the conformance runner) and only the daemon reloads. A Config
+	// carrying both uses this one.
+	CompartmentSource Compartments
 
 	// Skew tolerated on exp/nbf/iat. Clocks disagree; without it a token
 	// minted a second in the future by a fast IdP is refused for no reason.
@@ -98,7 +107,8 @@ func NewVerifier(cfg Config) *Verifier {
 // silently narrowing the caller's authority without saying so turns that typo
 // into an unexplained permission denial.
 func (v *Verifier) Verify(ctx context.Context, token string) (*toolplane.Principal, []string, error) {
-	if v.cfg.KeySet == nil || v.cfg.Compartments == nil ||
+	reg := v.compartments()
+	if v.cfg.KeySet == nil || reg == nil ||
 		len(v.cfg.Issuers) == 0 || v.cfg.Audience == "" {
 		return nil, nil, fmt.Errorf("authn: verifier is not configured")
 	}
@@ -143,11 +153,24 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*toolplane.Princip
 		return nil, nil, err
 	}
 
-	p, dropped, err := Fold(claims, v.cfg.Compartments)
+	p, dropped, err := Fold(claims, reg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("authn: %w", err)
 	}
 	return p, dropped, nil
+}
+
+// compartments is the taxonomy for THIS verification, read once.
+//
+// Once, and held for the whole fold: reading it twice would let a reload
+// between two levels of one delegation chain intersect authority across two
+// generations, which is the mixed-generation failure immutability exists to
+// prevent.
+func (v *Verifier) compartments() *policy.Registry {
+	if v.cfg.CompartmentSource != nil {
+		return v.cfg.CompartmentSource.Registry()
+	}
+	return v.cfg.Compartments
 }
 
 // checkRegistered validates iss, aud and the time window.

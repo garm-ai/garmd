@@ -321,12 +321,19 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// availability — the surface logs the drop, because dropping authority
 	// silently is how a typo becomes an unexplained denial nobody can trace.
 	//
-	// Built once, from the boot catalogue. See KNOWN-GAPS.md: a reload that
-	// adds a compartment does not reach this registry until a restart.
+	// Rebuilt on every successful reload, because the taxonomy is a property
+	// of the artifact and the artifact changes.
+	//
+	// Built from the boot catalogue and held behind a swappable pointer, so a
+	// reload that declares a new compartment reaches the verifier on the next
+	// token rather than on the next restart. Nothing calls Set yet — the
+	// reload path that will is a later task; until then this serves the boot
+	// generation and the swap is only latent.
 	reg, err := policy.NewRegistry(cat.Compartments)
 	if err != nil {
 		return fmt.Errorf("the catalogue's compartment declarations: %w", err)
 	}
+	compartments := authn.NewSwappable(reg)
 
 	// Reconciliation is not optional in a deployment. Without it, a service
 	// built from a different contract answers anyway — protobuf ignores
@@ -339,10 +346,10 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// slow or absent IdP at boot costs the first call rather than the
 	// process.
 	verifier := authn.NewVerifier(authn.Config{
-		KeySet:       authn.NewKeySet(authn.KeySetConfig{URL: o.jwksURL}),
-		Issuers:      []string{o.issuer},
-		Audience:     o.audience,
-		Compartments: reg,
+		KeySet:            authn.NewKeySet(authn.KeySetConfig{URL: o.jwksURL}),
+		Issuers:           []string{o.issuer},
+		Audience:          o.audience,
+		CompartmentSource: compartments,
 	})
 
 	h := &serve.Handler{
