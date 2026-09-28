@@ -27,7 +27,11 @@ type fakeS3 struct {
 	mu   sync.Mutex
 	body []byte
 	etag string
-	code int // when non-zero, every request gets this status
+	// emptyETag sends an ETag header whose value is "", which the SDK
+	// deserialises as a non-nil pointer to "" — a different state from an
+	// omitted header, and one the source must refuse just the same.
+	emptyETag bool
+	code      int // when non-zero, every request gets this status
 	gets int
 	head int
 }
@@ -64,7 +68,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	if f.etag != "" {
+	if f.etag != "" || f.emptyETag {
 		w.Header().Set("ETag", f.etag)
 	}
 	switch r.Method {
@@ -163,6 +167,36 @@ func TestTheETagComesBackFromAHeadWithoutReadingTheObject(t *testing.T) {
 // A poller compares this generation's ETag with the last one it saw, and ""
 // compared to "" never differs: a store that omits the header would look
 // like an object that never changes. That is refused rather than trusted.
+// The ceiling is inclusive: an object of exactly MaxBytes is a legal
+// catalogue, and a check written as >= would refuse it.
+func TestReadAcceptsAnObjectExactlyAtTheCeiling(t *testing.T) {
+	body := make([]byte, catalogue.MaxBytes)
+	_, client := newFakeS3(t, body, `"abc"`)
+
+	got, err := source(client).Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read refused an object exactly at the ceiling: %v", err)
+	}
+	if len(got) != catalogue.MaxBytes {
+		t.Fatalf("Read returned %d bytes, want %d", len(got), catalogue.MaxBytes)
+	}
+}
+
+// A present-but-empty ETag header is the other way a store can fail to
+// signal change; the SDK hands it over as a pointer to "", not nil.
+func TestAPresentButEmptyETagIsAnError(t *testing.T) {
+	fake, client := newFakeS3(t, []byte("the artifact"), "")
+	fake.emptyETag = true
+
+	_, err := source(client).ETag(context.Background())
+	if err == nil {
+		t.Fatal("a HEAD with an empty ETag header reported a successful ETag")
+	}
+	if !strings.Contains(err.Error(), "cannot signal change") {
+		t.Errorf("the error does not say why an empty ETag is refused: %v", err)
+	}
+}
+
 func TestAnAbsentETagIsAnError(t *testing.T) {
 	_, client := newFakeS3(t, []byte("the artifact"), "")
 
