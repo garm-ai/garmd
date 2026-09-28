@@ -1,6 +1,7 @@
 package conformance_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,17 +174,22 @@ func TestLoadSuiteRequiresExactlyOneAssertionPerCase(t *testing.T) {
 func TestLoadSuiteValidatesAGrantCase(t *testing.T) {
 	good := `{"name":"x","grant":{"tool":"payments.v1.initiate_payment",
 		"subject":"customer:C-8123","approver":"jdoe","approverClearance":"RESTRICTED",
+		"toolApproverMinClearance":"RESTRICTED","toolMaxGrantAgeSeconds":900,
 		"expectApprover":"employee:jdoe","material":{"amount_minor_units":"25000"}}}`
 	if _, err := loadCase(t, good); err != nil {
 		t.Fatalf("LoadSuite refused a well-formed grant case: %v", err)
 	}
 
+	// declared is the complete tool declaration every grant case must carry,
+	// factored out so each entry below is about the ONE field it omits.
+	const declared = `"approverClearance":"RESTRICTED","toolApproverMinClearance":"RESTRICTED",` +
+		`"toolMaxGrantAgeSeconds":900,`
 	for name, body := range map[string]string{
-		"no tool":            `{"name":"x","grant":{"subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe"}}`,
-		"no subject":         `{"name":"x","grant":{"tool":"a.b","approver":"jdoe","expectApprover":"employee:jdoe"}}`,
-		"no approver":        `{"name":"x","grant":{"tool":"a.b","subject":"customer:C","expectApprover":"employee:jdoe"}}`,
-		"no expectApprover":  `{"name":"x","grant":{"tool":"a.b","subject":"customer:C","approver":"jdoe"}}`,
-		"malformed material": `{"name":"x","grant":{"tool":"a.b","subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe","material":{"a=b":"1"}}}`,
+		"no tool":            `{"name":"x","grant":{` + declared + `"subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe"}}`,
+		"no subject":         `{"name":"x","grant":{` + declared + `"tool":"a.b","approver":"jdoe","expectApprover":"employee:jdoe"}}`,
+		"no approver":        `{"name":"x","grant":{` + declared + `"tool":"a.b","subject":"customer:C","expectApprover":"employee:jdoe"}}`,
+		"no expectApprover":  `{"name":"x","grant":{` + declared + `"tool":"a.b","subject":"customer:C","approver":"jdoe"}}`,
+		"malformed material": `{"name":"x","grant":{` + declared + `"tool":"a.b","subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe","material":{"a=b":"1"}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := loadCase(t, body); err == nil {
@@ -239,4 +245,78 @@ func TestTheShippedSuitesLoad(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A misspelled clearance must fail the LOAD, not become UNSPECIFIED.
+//
+// This is the one typo in a grant case that fails OPEN. `toolApproverMinClearance`
+// becomes the ToolDef's ApproverMinClearance, and grants.Verifier skips the
+// approver-seniority check entirely when that is UNSPECIFIED — so
+// "RESTRICTD" would produce a case that mints a grant, verifies it without
+// ever judging the approver, and reports ok. The same reasoning applies to
+// `approverClearance`, which is what the approver's token is minted with: a
+// misspelling there silently asks the upstream IdP for its default.
+func TestLoadSuiteRejectsAMisspelledClearanceOnAGrantCase(t *testing.T) {
+	for _, field := range []string{"approverClearance", "toolApproverMinClearance"} {
+		for _, spelling := range []string{"RESTRICTD", "UNSPECIFIED", "CLEARANCE_UNSPECIFIED", ""} {
+			t.Run(field+"="+spelling, func(t *testing.T) {
+				body := fmt.Sprintf(`{"name":"x","grant":{"tool":"a.b","subject":"customer:C",
+					"approver":"jdoe","expectApprover":"employee:jdoe",
+					"approverClearance":%q,"toolApproverMinClearance":%q,
+					"toolMaxGrantAgeSeconds":900}}`,
+					valueFor(field, "approverClearance", spelling, "RESTRICTED"),
+					valueFor(field, "toolApproverMinClearance", spelling, "RESTRICTED"))
+				err := loadCaseErr(t, body)
+				if err == nil {
+					t.Fatalf("LoadSuite accepted %s=%q; an unknown clearance is UNSPECIFIED, "+
+						"and UNSPECIFIED skips the approver check altogether", field, spelling)
+				}
+				if !strings.Contains(err.Error(), field) {
+					t.Fatalf("the error must name %s as the offending field, got: %v", field, err)
+				}
+			})
+		}
+	}
+}
+
+// valueFor returns bad for the field under test and good for the other, so one
+// table drives both fields without a case ever being wrong in two places at once.
+func valueFor(under, field, bad, good string) string {
+	if under == field {
+		return bad
+	}
+	return good
+}
+
+// A tool that declares no ceiling has no age this plane can enforce:
+// grants.Verifier skips the age check when MaxGrantAge is zero, so a grant
+// case without one asserts that an approval of ANY age is accepted. Same
+// fail-open shape as the clearance above, and the same answer.
+func TestLoadSuiteRequiresAGrantCaseToDeclareItsToolsCeilings(t *testing.T) {
+	for name, body := range map[string]string{
+		"no max grant age": `{"name":"x","grant":{"tool":"a.b","subject":"customer:C",
+			"approver":"jdoe","expectApprover":"employee:jdoe",
+			"approverClearance":"RESTRICTED","toolApproverMinClearance":"RESTRICTED"}}`,
+		"a negative max grant age": `{"name":"x","grant":{"tool":"a.b","subject":"customer:C",
+			"approver":"jdoe","expectApprover":"employee:jdoe",
+			"approverClearance":"RESTRICTED","toolApproverMinClearance":"RESTRICTED",
+			"toolMaxGrantAgeSeconds":-1}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := loadCaseErr(t, body)
+			if err == nil {
+				t.Fatal("LoadSuite accepted a grant case declaring no age ceiling; " +
+					"the verifier skips the age check entirely without one")
+			}
+			if !strings.Contains(err.Error(), "toolMaxGrantAgeSeconds") {
+				t.Fatalf("the error must name toolMaxGrantAgeSeconds, got: %v", err)
+			}
+		})
+	}
+}
+
+func loadCaseErr(t *testing.T, caseJSON string) error {
+	t.Helper()
+	_, err := loadCase(t, caseJSON)
+	return err
 }

@@ -333,10 +333,19 @@ func runGrantCase(ctx context.Context, c Case, m Minter, s *Suite, jwksURL strin
 		return fmt.Errorf("minting the grant: %w", err)
 	}
 
+	// LoadSuite has already refused an unknown or UNSPECIFIED spelling, so
+	// this cannot fail for a suite that was loaded. It is checked anyway
+	// rather than discarded: a caller building a Suite in memory bypasses
+	// the loader, and the failure mode is the silent one — UNSPECIFIED makes
+	// grants.Verifier skip the approver-seniority check altogether.
+	minClearance, err := ClearanceValue(g.ToolApproverMinClearance)
+	if err != nil {
+		return fmt.Errorf("toolApproverMinClearance: %w", err)
+	}
 	def := toolplane.ToolDef{
 		FQN:                  g.Tool,
 		ApprovalMode:         toolv1.Approval_MODE_GRANT,
-		ApproverMinClearance: clearanceValue(g.ToolApproverMinClearance),
+		ApproverMinClearance: minClearance,
 		ApproverCompartments: g.ToolApproverCompartments,
 		MaxGrantAge:          time.Duration(g.ToolMaxGrantAgeSeconds) * time.Second,
 	}
@@ -393,17 +402,4 @@ func grantBody(raw string) (*grantClaimBody, error) {
 		return nil, fmt.Errorf("the grant's body is not JSON: %w", err)
 	}
 	return &body.Grant, nil
-}
-
-// clearanceValue accepts the bare spelling a suite writes and the
-// CLEARANCE_ spelling the enum uses. An empty name is UNSPECIFIED, which is
-// how a tool says it requires no particular seniority of an approver.
-func clearanceValue(name string) toolv1.Clearance {
-	if name == "" {
-		return toolv1.Clearance_CLEARANCE_UNSPECIFIED
-	}
-	if !strings.HasPrefix(name, "CLEARANCE_") {
-		name = "CLEARANCE_" + name
-	}
-	return toolv1.Clearance(toolv1.Clearance_value[name])
 }

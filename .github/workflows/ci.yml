@@ -180,9 +180,20 @@ jobs:
       # and build ./cmd/sts from this checkout: the conformance suite is
       # pinned against the deployment fixtures sts actually ships, not
       # against a copy of them kept here.
+      #
+      # PINNED TO feat/agent-mvp, and this pin is temporary. The endpoints
+      # this suite drives — exchange 2's governed door, POST /approve — and
+      # the deploy fixtures it reads (can_run tuples, the approve: config
+      # block) exist only on that branch; sts@main has none of them and
+      # refuses to start on the `approve:` block below, because its
+      # LoadConfig reads with KnownFields(true). DROP THIS `ref` when
+      # sts v0.3.0 is tagged and merged, and replace it with that tag: a
+      # branch ref means this job silently follows whatever lands there,
+      # which is the opposite of what a drift check is for.
       - uses: actions/checkout@v5
         with:
           repository: garm-ai/sts
+          ref: feat/agent-mvp
           path: sts
           token: ${{ secrets.GARM_CI_TOKEN || github.token }}
 

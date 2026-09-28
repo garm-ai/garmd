@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 
+	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"github.com/garm-ai/garm/contracts/grant"
 )
 
@@ -226,6 +228,32 @@ func validateGrant(path, name string, g *Grant) error {
 			return fmt.Errorf("conformance: %s: grant case %q has no %s", path, name, f.field)
 		}
 	}
+	// Both clearances, at LOAD, because this is the one typo in a grant case
+	// that fails OPEN. grants.Verifier skips the approver-seniority check
+	// entirely when the tool's ApproverMinClearance is UNSPECIFIED, and an
+	// unknown name is UNSPECIFIED — so "RESTRICTD" would mint a grant, verify
+	// it without ever judging the approver, and report ok. UNSPECIFIED spelled
+	// out is refused for the same reason and not as a shape rule: a case may
+	// legitimately want a tool that requires no particular seniority, but it
+	// cannot want that here, where the whole point is to pin what the issuer
+	// recorded against what a tool demanded.
+	for _, f := range []struct{ field, value string }{
+		{"approverClearance", g.ApproverClearance},
+		{"toolApproverMinClearance", g.ToolApproverMinClearance},
+	} {
+		if _, err := ClearanceValue(f.value); err != nil {
+			return fmt.Errorf("conformance: %s: grant case %q: %s: %w", path, name, f.field, err)
+		}
+	}
+	// Same fail-open shape: checkShape skips the age check when MaxGrantAge is
+	// zero, so a case declaring no ceiling asserts that an approval of ANY age
+	// is accepted — which is not what a grant case is for.
+	if g.ToolMaxGrantAgeSeconds <= 0 {
+		return fmt.Errorf("conformance: %s: grant case %q: toolMaxGrantAgeSeconds is %d; "+
+			"it must be positive, because a tool declaring no ceiling has no age this "+
+			"verifier checks and the case would accept an approval of any age",
+			path, name, g.ToolMaxGrantAgeSeconds)
+	}
 	// Checked here rather than left to the issuer: a path the issuer would
 	// refuse turns the case into an accidental mintError, which is not what
 	// it says it is asserting.
@@ -235,4 +263,26 @@ func validateGrant(path, name string, g *Grant) error {
 		}
 	}
 	return nil
+}
+
+// ClearanceValue reads the bare spelling a suite writes ("RESTRICTED") and the
+// CLEARANCE_ spelling the enum uses, and REFUSES anything else — including
+// UNSPECIFIED, which is the zero value rather than a clearance anybody holds.
+//
+// It returns an error rather than a zero value because the zero value is the
+// dangerous answer here: every check in grants.Verifier that reads a clearance
+// treats UNSPECIFIED as "no requirement", so a silent fallback turns a typo
+// into a case that passes while checking less than it says.
+func ClearanceValue(name string) (toolv1.Clearance, error) {
+	spelled := strings.ToUpper(strings.TrimSpace(name))
+	if spelled != "" && !strings.HasPrefix(spelled, "CLEARANCE_") {
+		spelled = "CLEARANCE_" + spelled
+	}
+	v, ok := toolv1.Clearance_value[spelled]
+	if !ok || toolv1.Clearance(v) == toolv1.Clearance_CLEARANCE_UNSPECIFIED {
+		return toolv1.Clearance_CLEARANCE_UNSPECIFIED, fmt.Errorf(
+			"%q is not a clearance; want one of PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED "+
+				"(bare or CLEARANCE_-prefixed)", name)
+	}
+	return toolv1.Clearance(v), nil
 }

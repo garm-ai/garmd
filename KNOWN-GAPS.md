@@ -366,7 +366,17 @@ are `checkout`'d and run as processes, never imported, and the `boundaries`
 job re-asserts `go list -deps -test ./...` names neither `garm-ai/devkit`
 nor `garm-ai/sts`, under both tag sets.
 
-What remains unguarded, in five parts:
+**The STS is checked out at `ref: feat/agent-mvp`, not at a release.** The
+endpoints the last three cases drive and the deploy fixtures they read live
+only on that branch, so the job would otherwise build an `sts` that refuses
+to start on the `approve:` block this job writes. That pin is a gap while it
+lasts: a branch ref means this job follows whatever lands there, so a change
+on the STS side can turn this build red without anything changing here — and,
+worse, a case could be made to pass by an edit on that branch rather than by
+the two sides agreeing. It becomes the `v0.3.0` tag when that is cut, and the
+`ref` line in `ci.yml` says so.
+
+What remains unguarded, in seven parts:
 
 **The suite covers the cases in `sts.json` and no others**, so a claim shape
 only a different persona or a different tool declaration would exercise is
@@ -380,6 +390,29 @@ proto message and no descriptor, so the harness declares a `ToolDef` with no
 `MaterialFields` — which makes that check a no-op — and asserts the digest
 directly instead. Re-extraction from a real request is covered by
 `internal/grants`'s own tests, never by this job.
+
+**The suite format has no `/approve` REFUSAL kind.** `mintError` asserts that
+the token endpoint said no; there is no counterpart for the approval endpoint,
+so every refusal the STS owes a caller there is unchecked by this job: a
+customer-kind approver, an approver whose token carries an `act` chain (an
+agent approving its own destructive call), a malformed material path, a
+missing or wrong `client_assertion`. Each is pinned by `sts`'s own tests on
+its own side, which is exactly the arrangement this job exists because it
+cannot be trusted alone. Adding a `grantError` kind is the obvious shape and
+is post-MVP. Nothing here asserts that two grants carry different `jti`s
+either — single-use is `internal/grants`'s subject, and the harness's own
+replay cache is per-run.
+
+**`Expect` asserts neither the tenant nor the delegation chain.** It compares
+subject, actor, kind, clearance, compartments, verbs, tool sets, dropped
+compartments and execution — and `toolplane.Principal` carries more than
+that. The tenant is what confines a caller to their own organisation's data,
+and it became load-bearing on the governed door, where the runner supplies it
+as a form field rather than it arriving inside a verified subject token. The
+chain is every hop the fold walked. Both are minted and both are folded; a
+case cannot yet say what either should be. Post-MVP, and the reason it is
+listed here rather than fixed in passing is that `Chain` needs a shape
+decision in the suite format, not just a field.
 
 **The suites live in this repository.** `internal/conformance/suites/` holds
 `devkit.json` and `sts.json`. They were in the private `spec` repo, which made
