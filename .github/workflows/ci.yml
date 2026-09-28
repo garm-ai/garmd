@@ -210,9 +210,155 @@ jobs:
               echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
               exit 1
             fi
-            if echo "$deps" | grep -q 'garm-ai/devkit'; then
+            if echo "$deps" | grep -qE 'garm-ai/(devkit|sts)'; then
               echo "::error::garmd has acquired a dependency on a token minter (tags=\"$tags\")" >&2
               exit 1
             fi
           done
           echo "clean: no minter in the dependency graph, untagged or under -tags conformance"
+
+  conformance-sts:
+    name: identity conformance (sts)
+    runs-on: ubuntu-latest
+    # Same reasoning as the devkit conformance job above: both the `spec`
+    # and `sts` checkouts below need a secret a fork PR is handed none of.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: garmd
+
+      # Cloned, never required — see the boundaries job's "no dependency on
+      # a minter" check, which now also greps for garm-ai/sts.
+      - uses: actions/checkout@v5
+        with:
+          repository: garm-ai/devkit
+          path: devkit
+
+      - uses: actions/checkout@v5
+        with:
+          repository: garm-ai/sts
+          path: sts
+          token: ${{ secrets.GARM_CI_TOKEN || github.token }}
+
+      # spec's default branch, on purpose — see the devkit conformance job
+      # above for why. conformance/identity/sts.json currently lives only on
+      # spec's feat/sts-conformance-suite branch, so this job stays red until
+      # that branch (and this one) land on their respective default
+      # branches. That first red run is expected, not a regression.
+      - uses: actions/checkout@v5
+        with:
+          repository: garm-ai/spec
+          path: spec
+          token: ${{ secrets.GARM_CI_TOKEN || github.token }}
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+          working_directory: garmd
+
+      - name: start the upstream IdP (devkit)
+        working-directory: devkit
+        run: |
+          # Redirected to a file, and for the same reason the devkit
+          # conformance job's own idp step gives: an unredirected background
+          # child holds this step's log pipe open and the job hangs until
+          # timeout instead of proceeding to the readiness poll below.
+          #
+          # No --personas: the STS's exchange requires a subject_token
+          # carrying a `tenant` claim, and devkit's persona (?user=) form
+          # never attaches one. FormMinter's upstream fetch instead drives
+          # devkit's ad-hoc ?sub=&tenant= form, which does — see
+          # form_minter.go's doc comment on UpstreamURL.
+          go run ./cmd/garmdev idp \
+            --addr 127.0.0.1:7450 \
+            --audience garm-customer-idp > /tmp/devkit-idp.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7450/.well-known/jwks.json >/dev/null && exit 0
+            sleep 1
+          done
+          echo "the upstream IdP never came up" >&2
+          cat /tmp/devkit-idp.log >&2
+          exit 1
+
+      - name: generate the sts signing key and a conformance client keypair
+        run: |
+          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/sts-sign-k1.pem
+          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/conformance-client.key
+          openssl ec -in /tmp/conformance-client.key -pubout -out /tmp/conformance-client.pub.pem 2>/dev/null
+
+      - name: write an sts config trusting devkit
+        run: |
+          # $GITHUB_WORKSPACE, not a relative path: this file is read by a
+          # process started from an arbitrary CWD below, and deploy/claims.yaml
+          # / deploy/tuples.yaml must resolve regardless of it — the same
+          # "absolute, never relative" rule the conformance step further down
+          # applies to -suite.
+          cat > /tmp/sts-config.yaml <<EOF
+          issuer: https://sts.internal.example.com
+          audience: garm://garmd
+          listen: 127.0.0.1:8081
+          tokenEndpointAudience: https://sts.internal.example.com/token
+          delegationTTL: 10m
+          keys:
+            active: k1
+            keys:
+              - kid: k1
+                pem: \$STS_SIGN_KEY_K1
+          issuers:
+            - name: devkit-customer
+              iss: https://garmdev.invalid/idp
+              jwks: http://127.0.0.1:7450/.well-known/jwks.json
+              audience: [garm-customer-idp]
+              kind: customer
+          clients:
+            - id: conformance-client
+              keys:
+                - /tmp/conformance-client.pub.pem
+          policy: $GITHUB_WORKSPACE/sts/deploy/claims.yaml
+          authz:
+            static: $GITHUB_WORKSPACE/sts/deploy/tuples.yaml
+          instanceAuthorization:
+            status: absent
+            unconfinedCeiling: PUBLIC
+          EOF
+          cat /tmp/sts-config.yaml
+
+      - name: start the sts
+        working-directory: sts
+        run: |
+          export STS_SIGN_KEY_K1="$(cat /tmp/sts-sign-k1.pem)"
+          go build -o /tmp/sts-bin ./cmd/sts
+          # Same redirect-to-a-file requirement as the upstream IdP step
+          # above, for the same reason.
+          /tmp/sts-bin -config /tmp/sts-config.yaml > /tmp/sts.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8081/.well-known/jwks.json >/dev/null && exit 0
+            sleep 1
+          done
+          echo "the sts never came up" >&2
+          cat /tmp/sts.log >&2
+          exit 1
+
+      - name: conformance
+        working-directory: garmd
+        run: |
+          # Absolute, via $GITHUB_WORKSPACE, for the same reason the devkit
+          # conformance job's own -suite path is: go test's working directory
+          # is the PACKAGE directory, not the module root, so a relative
+          # ../spec/... would resolve under garmd, not beside it.
+          go test -tags conformance ./internal/conformance/ -v \
+            -suite "$GITHUB_WORKSPACE/spec/conformance/identity/sts.json" \
+            -idp http://127.0.0.1:8081 \
+            -minter form \
+            -client-id conformance-client \
+            -client-key /tmp/conformance-client.key \
+            -token-endpoint-aud https://sts.internal.example.com/token \
+            -upstream-idp http://127.0.0.1:7450
+
+      - name: dump service logs on failure
+        if: failure()
+        run: |
+          echo "::group::devkit"; cat /tmp/devkit-idp.log 2>/dev/null; echo "::endgroup::"
+          echo "::group::sts"; cat /tmp/sts.log 2>/dev/null; echo "::endgroup::"
