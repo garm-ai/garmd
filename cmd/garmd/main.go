@@ -104,6 +104,7 @@ func bytesHuman(n int64) string {
 func newServeCmd() *cobra.Command {
 	var cataloguePath, natsURL, listen string
 	var jwksURL, issuer, audience, hashKeyFile string
+	var grantIssuer, grantJWKSURL, grantAudienceName string
 	var maxTools int
 	var auditRetention time.Duration
 	var ledgerStream bool
@@ -121,6 +122,10 @@ func newServeCmd() *cobra.Command {
 				issuer:    issuer,
 				audience:  audience,
 				hashKey:   hashKeyFile,
+
+				grantIssuer:   grantIssuer,
+				grantJWKS:     grantJWKSURL,
+				grantAudience: grantAudienceName,
 				// The FLAG being set is what turns the audit stream on, not
 				// its value: zero is a meaningful retention (indefinite, per
 				// the Sink contract) and the strongest claim available, so it
@@ -171,6 +176,19 @@ func newServeCmd() *cobra.Command {
 			"SAME key on every replica and across restarts: a key that changes "+
 			"means the same value hashes two ways, so the correlation those "+
 			"redactions exist to preserve stops working silently")
+	cmd.Flags().StringVar(&grantIssuer, "grant-issuer", "",
+		"Issuer whose approval grants this plane accepts. Setting it TURNS ON step 5: "+
+			"without it a catalogue declaring a MODE_GRANT tool will not mount, which "+
+			"is the correct refusal — an approval-gated tool served with no verifier "+
+			"is an approval nobody gave")
+	cmd.Flags().StringVar(&grantJWKSURL, "grant-jwks", "",
+		"JWKS endpoint whose keys sign approval grants. Defaults to --jwks, because an "+
+			"STS that issues both tokens and approvals is the ordinary deployment and "+
+			"typing the same URL twice is how the two end up disagreeing")
+	cmd.Flags().StringVar(&grantAudienceName, "grant-audience", "",
+		"Audience an approval grant must name. Defaults to --audience. A grant minted "+
+			"for another deployment is a VALID grant, and this is the only thing that "+
+			"stops it being spent here")
 	return cmd
 }
 
@@ -183,6 +201,10 @@ type serveOpts struct {
 	issuer    string
 	audience  string
 	hashKey   string
+
+	grantIssuer   string
+	grantJWKS     string
+	grantAudience string
 
 	audit          bool
 	auditRetention time.Duration
@@ -274,6 +296,15 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), nil))
 	tp := garmnats.New(nc)
 
+	// Step 5, before the listener. A replay cache that cannot be opened, or one
+	// that forgets faster than the catalogue's longest approval, is a
+	// misconfiguration that must stop this process rather than be discovered
+	// by whoever replays a grant.
+	grantsFor, err := grantVerifier(cmd.Context(), nc, cat, o)
+	if err != nil {
+		return err
+	}
+
 	// Where the two halves of the record go. They share a connection and
 	// nothing else: the ledger batches and degrades, the audit stream writes
 	// one message per call and may refuse one. See KNOWN-GAPS.md.
@@ -327,6 +358,11 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 		// declaring an audit stream, so a catalogue that needs one stops the
 		// process at startup instead of being served unaudited.
 		Audit: auditSink,
+		// Nil unless --grant-issuer was given, and nil is the configured
+		// answer: Prepare refuses to mount any MODE_GRANT tool without one, so
+		// a deployment that forgot the flag stops at startup instead of
+		// serving an approval-gated tool unapproved.
+		Grants: grantsFor,
 	}
 
 	// Ask the issuer what it actually mints, before binding.
@@ -392,11 +428,7 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 		fmt.Fprintf(out, "  no audit stream; a catalogue declaring an audited tool "+
 			"would not have started\n")
 	}
-	fmt.Fprintf(out, "\n"+
-		"  Every call goes through the chain. Steps 1, 2, 3, 8 and 9 are\n"+
-		"  implemented; instance authorization, grants and notify are NOT, and a\n"+
-		"  tool declaring them is mounted as though it had not. See KNOWN-GAPS.md\n"+
-		"  before putting this in front of anything that matters.\n\n")
+	fmt.Fprint(out, chainBanner(grantsFor != nil, o.grantIssuer))
 
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err

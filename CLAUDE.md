@@ -92,13 +92,22 @@ The ones that govern this repository:
 
 **Do not create `docs/superpowers/` here.**
 
-## Not yet built
+## What is not built
 
-Not everything, any more. The catalogue loads, `serve` binds and routes, and
-the chain runs on every call — an answer that produced a ledger row carries
-`Garm-Event-Id` naming it (successes and every refusal the chain decided; not
-the ones refused before it), and a successful answer also carries
-`Garm-Catalogue-Digest`. Several chain
-steps are still nil, which the chain treats as "not declared" and refuses to
-mount a tool that needs one. `KNOWN-GAPS.md` is the list; read it rather than
-this section.
+`serve` is built: it loads a catalogue, binds, and runs every call through the
+chain. An answer that produced a ledger row carries `Garm-Event-Id` naming it
+(successes and every refusal the chain decided; not the ones refused before
+it), and a successful answer also carries `Garm-Catalogue-Digest`.
+
+Step 5 — human approval grants, single-use — is implemented, and `garmd serve
+--grant-issuer` is what constructs it. Without the flag there is no verifier,
+and that is the configured answer rather than a hole: a MODE_GRANT catalogue
+then does not mount.
+
+What is not implemented is instance authorization (steps 4 and 7) and notify
+(step 10) — and a catalogue declaring either **will not mount**, so this
+process refuses to start rather than serve a tool ungated while its schema says
+it is supervised. That refusal is the design, not a gap.
+
+`KNOWN-GAPS.md` is the list, and it is kept honest by the tasks that change
+what it says.

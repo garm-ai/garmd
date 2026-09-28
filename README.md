@@ -58,7 +58,13 @@ who is calling it and a delegated call does not arrive looking direct. It
 carries assertions and never credentials: the caller's token does not cross
 this boundary in any form, and neither does clearance or compartments.
 
-Not every step of the chain is implemented. `KNOWN-GAPS.md` is the list, and it
+Steps 1, 2, 3, 6, 8 and 9 of the chain are implemented, and step 5 — human
+approval grants, single-use — is implemented and constructed when
+`--grant-issuer` is set. Instance authorization (steps 4 and 7) and notify
+(step 10) are not implemented, and a catalogue declaring either refuses to
+mount rather than being served ungated.
+
+See `KNOWN-GAPS.md` before putting this in front of anything that matters. It
 is kept honest rather than aspirational.
 
 MIT licensed.

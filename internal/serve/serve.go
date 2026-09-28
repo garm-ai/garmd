@@ -353,6 +353,15 @@ func (h *Handler) writeChainErr(w http.ResponseWriter, def tool.Def, err error) 
 		writeGrantRequired(w, def)
 		return
 	}
+
+	// An approval WAS presented and is not good for this call. That is a
+	// denial: the caller must stop, not fetch another approval, and nobody
+	// should be paged. Without this it arrives carrying no connect code,
+	// becomes "internal", and answers 500.
+	if errors.Is(err, grants.ErrRefused) {
+		refuse(w, connect.NewError(connect.CodePermissionDenied, err))
+		return
+	}
 	if errors.Is(err, transport.ErrUnreachable) {
 		if h.Log != nil {
 			h.Log.Warn("tool is declared but unreachable",

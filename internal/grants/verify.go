@@ -23,6 +23,22 @@ import (
 // wire would say which of several things an attacker got right.
 var ErrGrantRequired = errors.New("a human grant is required")
 
+// ErrRefused means an approval WAS presented and is not good for this call:
+// wrong tool, wrong subject, too old, already spent, or minted against
+// material that differs from what is being sent.
+//
+// One sentinel for all of them, deliberately. Distinguishing them on the wire
+// would tell an attacker which of several things they got right, and every one
+// of them is the same answer to the caller: stop. It is separate from
+// ErrGrantRequired because that one is the opposite answer — go and get an
+// approval — and a caller told to fetch one when it had just presented a
+// tampered one would do exactly that, forever.
+//
+// It exists so a surface can answer PERMISSION_DENIED. Without it these
+// refusals reach the surface carrying no code at all and are answered
+// "internal", which pages an operator for a caller's own mistake.
+var ErrRefused = errors.New("the approval presented is not valid for this call")
+
 // Verifier is step 5.
 type Verifier struct {
 	// Keys verifies the grant's signature. The same JWKS the subject token is
@@ -68,7 +84,23 @@ func grantFrom(ctx context.Context) string {
 }
 
 // Verify implements toolplane.GrantVerifier.
+//
+// Every refusal except ErrGrantRequired is wrapped in ErrRefused, so the
+// surface can classify it without knowing anything about grants, and the
+// original sentence survives underneath for the ledger.
 func (v *Verifier) Verify(
+	ctx context.Context, p *toolplane.Principal, t toolplane.ToolDef, req proto.Message,
+) error {
+	err := v.verify(ctx, p, t, req)
+	if err == nil || errors.Is(err, ErrGrantRequired) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrRefused, err)
+}
+
+// verify is every check, each returning the sentence that says which one
+// failed. Verify above is what turns those into a code a surface can act on.
+func (v *Verifier) verify(
 	ctx context.Context, p *toolplane.Principal, t toolplane.ToolDef, req proto.Message,
 ) error {
 	if t.ApprovalMode != toolv1.Approval_MODE_GRANT {

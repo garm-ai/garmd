@@ -64,23 +64,39 @@ come out of the artifact. Reload replaces the pair or neither.
 
 ## Not built
 
-**Steps 4, 5, 7 and 10 have no implementation here, and a tool that declares
-them will not mount.** Instance authorization, grant verification and notify
-are `CoreConfig` seams, and `AddTools` refuses any tool declaring supervision
-the Core has not been given: a MODE_GRANT tool with no `GrantVerifier`, an
-authorization block with no `FGAChecker`, a MODE_NOTIFY tool with no
+**Steps 4, 7 and 10 have no implementation here, and a tool that declares them
+will not mount.** Instance authorization and notify are `CoreConfig` seams, and
+`AddTools` refuses any tool declaring supervision the Core has not been given:
+an authorization block with no `FGAChecker`, a MODE_NOTIFY tool with no
 `Notifier`. `serve.Prepare` runs that at startup, so the refusal stops the
 process rather than arriving one 503 at a time after a green deploy.
+
+**Step 5 IS implemented and IS constructed.** `internal/grants` verifies an
+approval — issuer, audience, tool, subject, age against the tool's own ceiling,
+approver seniority, and the material digest over the values the human actually
+saw — and `internal/replay` makes it single-use through the `GARM_GRANTS_SPENT`
+JetStream bucket, atomically and across replicas. `garmd serve --grant-issuer`
+builds both, checks the bucket's retention against the longest
+`max_grant_age_seconds` the catalogue declares, and refuses to start if the
+cache would forget a grant while it is still valid. Without the flag there is
+no verifier and a MODE_GRANT catalogue does not mount.
+
+A presented approval that is not good for this call — wrong tool, wrong
+subject, too old, already spent, material that differs from what was approved —
+is a `permission_denied`, not a `grant_required`: a caller told to fetch another
+approval after tampering with one would do exactly that.
 
 The refusal reads what THIS Core was configured with, not what the build
 contains, so supplying a verifier makes the same tool mount. It is an
 allowlist: an enum member that does not exist yet refuses by construction
 rather than falling through.
 
-Nothing in this repository currently supplies any of the three. So in
-practice a catalogue containing an approval-gated tool cannot be served at
-all — which is the intended failure, and the reason it is safe that the steps
-are unimplemented.
+`garmd serve` supplies the `GrantVerifier` when `--grant-issuer` is given, and
+supplies neither `FGAChecker` nor `Notifier` at all. So a catalogue declaring
+instance authorization or notify still cannot be served — which is the intended
+failure, and the reason it is safe that those steps are unimplemented — while an
+approval-gated catalogue is served by a deployment that configured step 5 and
+refused by one that did not.
 
 The audit block no longer refuses unconditionally. `LEVEL_AUDIT`,
 `fail_closed` and `retain_days` are all honourable now that a Sink exists —
