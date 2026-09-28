@@ -274,9 +274,13 @@ func TestTheListingShowsAnAgentAsTwoToolsAndNothingOfItsManifest(t *testing.T) {
 		"payments.v1.initiate_payment", // another
 		"amount_minor_units",           // a guard expression
 		"AgentPolicy",                  // the annotation's type
-		"50101",                        // its field number
 		"garm.agent.v1",                // the namespace
 	} {
+		// A literal that has left the fixture guards nothing; say so
+		// rather than staying quietly green.
+		if !strings.Contains(agentProtoSrc+bankAgentProtoSrc, leak) {
+			t.Fatalf("leak literal %q is no longer in the fixture; this check covers nothing", leak)
+		}
 		if strings.Contains(body, leak) {
 			t.Errorf("the listing carries %q; this process read the agent "+
 				"annotation. Body: %s", leak, body)

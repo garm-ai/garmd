@@ -200,8 +200,16 @@ func TestTheAgentAnnotationSurvivesTheLoadUnread(t *testing.T) {
 		}
 		return true
 	})
-	if len(unknown) == 0 && !found {
+	// Present AND unresolved. The day this process links garm's agent
+	// package, the extension resolves, `found` flips true, and this test
+	// fails — which is the point: garmd knowing about agents is the invariant
+	// this file guards, not a feature it gains.
+	if len(unknown) == 0 {
 		t.Error("the agent annotation did not survive the load; a catalogue that " +
 			"strips a namespace it does not understand breaks whatever does")
+	}
+	if found {
+		t.Error("the agent annotation RESOLVED in this process: garmd has linked " +
+			"the agent package and now knows about agents")
 	}
 }
