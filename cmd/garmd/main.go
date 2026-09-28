@@ -329,6 +329,17 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 		Audit: auditSink,
 	}
 
+	// Ask the issuer what it actually mints, before binding.
+	//
+	// An issuer minting `garm://garmd` against a daemon defaulting to `garm`
+	// refuses every token at runtime, correctly, with a message about the
+	// token rather than the configuration. This turns that into a startup
+	// error naming both sides. An issuer that publishes nothing — the dev IdP,
+	// a stock enterprise IdP — is unchecked rather than refused.
+	if err := authn.CheckIssuerMetadata(cmd.Context(), o.jwksURL, o.issuer, o.audience); err != nil {
+		return err
+	}
+
 	// Before the listener. A catalogue declaring supervision this deployment
 	// cannot apply must stop the process, not each request: the schema author
 	// was forced into the declaration, so the only outcomes left are a
