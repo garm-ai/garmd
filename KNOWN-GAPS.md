@@ -13,11 +13,19 @@
 - `internal/serve` — the agent-facing surface. Dynamic dispatch: a request is
   unmarshalled into a message built from a catalogue descriptor, routed over
   NATS, and the reply unmarshalled into another. No generated types anywhere.
-- **The ledger row's id is on every answer**, as `Garm-Event-Id`, beside
-  `Garm-Catalogue-Digest` — on a success and on every refusal that reached the
-  chain, including step 1's. A route this build does not serve produces no row
-  and carries no id, because a header naming a row nobody can find sends
-  whoever is debugging to query a ledger that will never answer.
+- **The ledger row's id is on every answer that produced one**, as
+  `Garm-Event-Id`: on a success, and on every refusal that reached the chain —
+  step 1's 401, the `not_found` for a tool the caller may not see, a chain
+  error, a `grant_required`, and the 500 from a resolver that panicked. The
+  refusals decided *before* the chain produce no row and carry no id: an
+  unrouted 404, a quarantined package's 503, a 413, a 400 that would not
+  unmarshal. A header naming a row nobody can find would send whoever is
+  debugging to query a ledger that will never answer.
+
+  `Garm-Catalogue-Digest` is narrower and is **not** a pair with it: it rides
+  on successful responses only, so a refusal says which row explains it but
+  not which catalogue decided it. Widening it is a small change nobody has
+  needed yet.
 - Reconciliation. A service advertises its descriptor hash; the catalogue
   records one per proto package; `garmd` compares them every 30s and refuses
   to route on a mismatch. Silence is not agreement, and a failed sweep leaves

@@ -39,10 +39,17 @@ only partly understands.
 
 `serve` binds a listener and routes tool calls: one route,
 `POST /pkg.Service/Method`, dispatched dynamically from the catalogue's
-descriptors and answered through the chain. Every answer carries
-`Garm-Catalogue-Digest` — which catalogue produced it — and, whenever the call
-reached the chain and so produced a ledger row, `Garm-Event-Id`: the id of that
-row, which is how a caller joins its own record of a call to the ledger's.
+descriptors and answered through the chain.
+
+Every answer that produced a ledger row carries `Garm-Event-Id` — the id of
+that row, which is how a caller joins its own record of a call to the ledger's.
+That is successes and every refusal the chain decided: the 401, the `not_found`
+for a tool you may not see, chain errors, `grant_required`. The refusals
+decided before the chain — an unrouted 404, a quarantined package, a body too
+large or one that would not unmarshal — produce no row and so carry no id.
+
+A successful answer also carries `Garm-Catalogue-Digest`, naming the catalogue
+that served it. Refusals do not carry it today.
 
 Not every step of the chain is implemented. `KNOWN-GAPS.md` is the list, and it
 is kept honest rather than aspirational.

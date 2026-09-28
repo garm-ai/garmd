@@ -31,17 +31,6 @@ func WithEventID(ctx context.Context, dst *string) context.Context {
 	return context.WithValue(ctx, eventIDKey{}, dst)
 }
 
-// EventIDForTest reads back what the chain wrote, so a test outside this
-// package can assert on the mechanism without an accessor anything in a
-// request path would be able to reach.
-func EventIDForTest(ctx context.Context) string {
-	dst, _ := ctx.Value(eventIDKey{}).(*string)
-	if dst == nil {
-		return ""
-	}
-	return *dst
-}
-
 // noteEventID records the id of the row this call will produce. A ctx with no
 // destination is the ordinary case — an in-process caller that never asked —
 // and costs one type assertion.

@@ -30,7 +30,7 @@ func TestAnUnauthenticatedCallNeverReachesTheTool(t *testing.T) {
 		Store:   &countingStore{c: aCatalogue()},
 		Invoker: inv,
 		Principals: func(context.Context) (*toolplane.Principal, error) {
-			return nil, errors.New("no bearer token on the request")
+			return nil, errNoCredential
 		},
 	})
 

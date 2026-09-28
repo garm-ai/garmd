@@ -8,14 +8,18 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/toolplane"
 )
 
 // errNoCredential is what a PrincipalFunc returns when the request carried no
-// bearer token. Spelled here rather than inline so the three tests that need
-// an unauthenticated call cannot drift apart on what "no credential" means.
+// bearer token. Named rather than spelled inline at each use so the tests that
+// need an unauthenticated call cannot drift apart on what "no credential"
+// means — govern_test.go asserts the text never reaches the caller, and the
+// test below asserts the refusal still gets a ledger row.
 var errNoCredential = errors.New("no bearer token on the request")
 
 // The ledger holds the whole story of a call and the caller holds none of it.
@@ -128,12 +132,83 @@ func TestARouteWithNoLedgerRowCarriesNoEventId(t *testing.T) {
 	}
 }
 
-// Nothing outside the chain may name a row. A surface that could write an id
-// of its own would be a second, unaudited author of the ledger's join key.
-func TestAnIdIsOnlyEverTheOneTheChainMinted(t *testing.T) {
-	var id string
-	ctx := toolplane.WithEventID(context.Background(), &id)
-	if got := toolplane.EventIDForTest(ctx); got != "" {
-		t.Errorf("an id appeared before any call was made: %q", got)
+// panickingInvoker stands in for a resolver that comes apart. The chain's own
+// recover is what turns that into a row and an answer, and this is the only
+// way to reach it from the surface.
+type panickingInvoker struct{ with any }
+
+func (p *panickingInvoker) Invoke(_ context.Context, _ string, _, _ proto.Message) error {
+	panic(p.with)
+}
+
+// The id has to survive the one path that does not return normally.
+//
+// The chain notes the id where the row is opened, before the resolver is
+// reached, precisely so a resolver that panics is still a row the caller can
+// find. An id noted after the resolver returned would be correct on every
+// path a test bothers to write and missing on the one anybody would actually
+// be debugging.
+func TestAPanickingResolverStillCarriesTheIdOfItsRow(t *testing.T) {
+	rec := &record.Memory{}
+	h := chained(&Handler{
+		Store:    &countingStore{c: aCatalogue()},
+		Invoker:  &panickingInvoker{with: "the resolver came apart"},
+		Recorder: rec,
+	})
+
+	w := call(t, h, httptest.NewRequest(http.MethodPost, route, strings.NewReader("")))
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", w.Code, w.Body.String())
+	}
+	events := rec.Events()
+	if len(events) != 1 {
+		t.Fatalf("%d ledger rows, want exactly 1", len(events))
+	}
+	if got := w.Header().Get(EventHeader); got != events[0].ID {
+		t.Errorf("Garm-Event-Id = %q, want %q: a panic is exactly the row "+
+			"someone will go looking for", got, events[0].ID)
+	}
+}
+
+// http.ErrAbortHandler is a deliberate "write nothing", and the row is still
+// owed.
+//
+// The two halves are separate promises. The ledger must see the call, because
+// a connection dropped mid-call is a security-relevant outcome like any
+// other; and the response must stay empty, because the whole meaning of
+// ErrAbortHandler is that net/http drops the connection without answering.
+// A header set on the way past would be this surface answering a request the
+// handler decided not to answer.
+func TestAnAbortedConnectionRecordsItsRowAndAnswersNothing(t *testing.T) {
+	rec := &record.Memory{}
+	h := chained(&Handler{
+		Store:    &countingStore{c: aCatalogue()},
+		Invoker:  &panickingInvoker{with: http.ErrAbortHandler},
+		Recorder: rec,
+	})
+
+	w := httptest.NewRecorder()
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, route, strings.NewReader("")))
+	}()
+
+	// Re-raised rather than converted: net/http is the only thing that may
+	// decide what an aborted connection means.
+	if recovered != http.ErrAbortHandler { //nolint:errorlint // net/http compares with ==, so we do too
+		t.Fatalf("recovered %v, want http.ErrAbortHandler", recovered)
+	}
+	if len(rec.Events()) != 1 {
+		t.Fatalf("%d ledger rows, want exactly 1: an aborted call still happened",
+			len(rec.Events()))
+	}
+	if got := w.Header().Get(EventHeader); got != "" {
+		t.Errorf("Garm-Event-Id = %q on a connection that was deliberately "+
+			"never answered", got)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("wrote %q to a connection net/http is about to drop", w.Body.String())
 	}
 }

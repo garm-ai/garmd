@@ -89,8 +89,10 @@ The ones that govern this repository:
 ## Not yet built
 
 Not everything, any more. The catalogue loads, `serve` binds and routes, and
-the chain runs on every call — a response carries `Garm-Catalogue-Digest` and,
-where the call produced a ledger row, `Garm-Event-Id` naming it. Several chain
+the chain runs on every call — an answer that produced a ledger row carries
+`Garm-Event-Id` naming it (successes and every refusal the chain decided; not
+the ones refused before it), and a successful answer also carries
+`Garm-Catalogue-Digest`. Several chain
 steps are still nil, which the chain treats as "not declared" and refuses to
 mount a tool that needs one. `KNOWN-GAPS.md` is the list; read it rather than
 this section.
