@@ -238,7 +238,11 @@ func defFor(fd protoreflect.FileDescriptor, svc protoreflect.ServiceDescriptor,
 		Input:        m.Input(),
 		Output:       m.Output(),
 
-		ApprovalMode: p.GetApproval().GetMode(),
+		ApprovalMode:         p.GetApproval().GetMode(),
+		ApproverMinClearance: p.GetApproval().GetApproverMinClearance(),
+		ApproverCompartments: p.GetApproval().GetApproverCompartments(),
+		MaxGrantAge: time.Duration(p.GetApproval().GetMaxGrantAgeSeconds()) *
+			time.Second,
 
 		AuditLevel:          p.GetAudit().GetLevel(),
 		AuditRecordRequest:  p.GetAudit().GetRecordRequest(),

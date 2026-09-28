@@ -215,6 +215,9 @@ func sameDeclarationAs(t, o ToolDef) bool {
 		md(t.Input) == md(o.Input) &&
 		md(t.Output) == md(o.Output) &&
 		t.ApprovalMode == o.ApprovalMode &&
+		t.ApproverMinClearance == o.ApproverMinClearance &&
+		slices.Equal(t.ApproverCompartments, o.ApproverCompartments) &&
+		t.MaxGrantAge == o.MaxGrantAge &&
 		t.AuditLevel == o.AuditLevel &&
 		t.AuditRecordRequest == o.AuditRecordRequest &&
 		t.AuditRecordResponse == o.AuditRecordResponse &&

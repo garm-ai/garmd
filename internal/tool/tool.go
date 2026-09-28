@@ -11,6 +11,7 @@ package tool
 
 import (
 	"strings"
+	"time"
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -59,7 +60,19 @@ type Def struct {
 	// declaration the runtime silently ignores is worse than no declaration,
 	// because it reads as protection in review.
 	ApprovalMode toolv1.Approval_Mode
-	AuditLevel   toolv1.Audit_Level
+
+	// The rest of the approval block. Only Mode used to reach here, which
+	// left MODE_GRANT meaning no more than "some grant existed" — a verifier
+	// could not check that the approver was senior enough, held the right
+	// compartments, or approved recently. Those three ARE the approval
+	// policy; without them the declaration names a gate and describes none of
+	// it.
+	//
+	// Same omission the audit block had, found the same way: by needing one.
+	ApproverMinClearance toolv1.Clearance
+	ApproverCompartments []string
+	MaxGrantAge          time.Duration
+	AuditLevel           toolv1.Audit_Level
 
 	// The rest of the audit block, carried because a declaration the runtime
 	// silently drops is worse than no declaration.
