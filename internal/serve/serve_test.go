@@ -62,6 +62,14 @@ const (
 // it stops working the moment the chain is in the path, which is the point.
 //
 // The field is named `producer` so the rest of this file reads unchanged.
+//
+// `approver_note` is the second field and it is there for one reason: it is
+// writable only at RESTRICTED, so the per-caller narrowing INSIDE a projected
+// schema has something to narrow. With one PUBLIC field every principal saw an
+// identical schema, and "a field you may not write is absent" was a claim no
+// test could have falsified. It is a bare scalar rather than an `optional`
+// one so that it lands in `required` too, which is the other half a consumer
+// reads.
 func message() protoreflect.MessageDescriptor {
 	fixtureOnce.Do(func() {
 		const src = `syntax = "proto3";
@@ -71,6 +79,8 @@ option go_package = "example.com/gen/srv_v1;x";
 message M {
   option (garm.tool.v1.default_field_policy) = { read: CLEARANCE_PUBLIC on_deny: { omit: {} } };
   optional string producer = 1;
+  string approver_note = 2 [(garm.tool.v1.field_policy) = {
+    read: CLEARANCE_PUBLIC write: CLEARANCE_RESTRICTED on_deny: { omit: {} } }];
 }
 `
 		res := protocompile.WithStandardImports(protocompile.CompositeResolver{

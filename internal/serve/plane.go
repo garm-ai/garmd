@@ -125,6 +125,26 @@ func (h *Handler) Prepare(cat *catalogue.Catalogue) error {
 }
 
 func (h *Handler) newPlane(cat *catalogue.Catalogue) (*plane, error) {
+	// Before anything is built, because it is a property of the catalogue and
+	// not of the chain. ServeHTTP answers ListToolsPath BEFORE it looks a route
+	// up — the listing is not a route — so a tool declared at that path would be
+	// permanently shadowed: never invoked, never refused, never reported, and
+	// every call to it answered with somebody's tool list. The catalogue would
+	// go on saying the tool is served.
+	//
+	// It lives here rather than in AddTools because ListToolsPath is this
+	// surface's, and toolplane does not know that this deployment has a front
+	// door with reserved paths on it. Here it covers the boot mount, the lazy
+	// build and the reload pre-flight, which is every way a generation arrives.
+	for _, d := range cat.Defs {
+		if d.FullMethod == ListToolsPath {
+			return nil, fmt.Errorf(
+				"mounting catalogue %s: %s is declared at %s, which is the tool "+
+					"listing endpoint and not a route: a tool there could never be "+
+					"called", cat.Digest, d.FQN, ListToolsPath)
+		}
+	}
+
 	core, err := toolplane.NewCore(toolplane.CoreConfig{
 		HashKey: h.HashKey,
 		// From the catalogue, not from this binary's configuration. Which

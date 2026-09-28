@@ -86,7 +86,7 @@ answers what this caller may call:
       "title": "Read a balance",
       "description": "…",
       "verb": "VERB_READ",
-      "approval_mode": "MODE_NONE",
+      "approval_mode": "MODE_UNSPECIFIED",
       "material_fields": [],
       "guidance": {"when_to_use": "…", "when_not_to_use": "…", "on_error": "…"},
       "input_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "…": "…"}
@@ -110,7 +110,10 @@ plan, nothing about any other caller. Everything in it is something the caller
 can act on — including `approval_mode` and `material_fields`, which are what it
 needs to go and obtain a grant before calling a gated tool. Enums are spelled
 as their names, the way protojson spells them, so a consumer needs no copy of
-the enum; a tool that declares no approval block reads `MODE_UNSPECIFIED`.
+the enum. The example above declares no approval block, which is why it reads
+`MODE_UNSPECIFIED` rather than `MODE_NONE`: the second is a value an author
+chose, the first is an author who said nothing, and only `MODE_GRANT` means a
+call needs an approval.
 
 `catalogue_digest` is in the body and on `Garm-Catalogue-Digest`, and it is the
 generation this request pinned, read once: a listing is one generation's,
@@ -118,6 +121,10 @@ whole, even when a reload lands while it is being answered. A successful listing
 writes no ledger row — a catalogue polled every turn would bury the calls under
 the listings — but an unauthenticated one is a 401 with a row, through the same
 step 1 the tool route uses, and carries that row's `Garm-Event-Id`.
+
+The path is reserved: a catalogue that declares a tool at it will not mount,
+naming the tool, because the listing is answered before any route lookup and
+such a tool could never be called.
 
 Every answer that produced a ledger row carries `Garm-Event-Id` — the id of
 that row, which is how a caller joins its own record of a call to the ledger's.

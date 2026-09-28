@@ -273,6 +273,29 @@ will later want a row for. Wiring the reconciler in as the chain's
 `AvailabilitySource` would fix it; the two checks would then need deciding
 between rather than both existing.
 
+**`ListTools` has no cap and no filter on the wire.** It answers the whole
+projection in one body: no page size, no ceiling on the number of tools, and no
+ceiling on the bytes — `maxRequestBytes` guards the request side only. A caller
+with a large catalogue is a large body per poll, and agentd's client refuses an
+answer over 16 MiB as a TERMINAL step failure rather than retrying it (an
+oversized answer is oversized again next time), so the first symptom is a run
+that cannot start rather than a slow one.
+
+`toolplane.CatalogFilter` is the mechanism when it is needed — name prefix,
+verb, service, tool set, maximum approval mode, conjunctive — and it is already
+what `Core.Catalog` takes. The endpoint hard-wires the zero value, because §3.7
+fixes the request as `{}` and Track D sends that. Putting those fields on the
+wire is additive and nobody has needed it yet; the catalogue sizes people run
+today fit comfortably, and `--max-tools` is the blunt instrument in the
+meantime.
+
+**A catalogue declaring a tool at `/garm.v1.ToolCatalogService/ListTools` will
+not mount.** The surface answers that path before it looks a route up, so such
+a tool would be permanently shadowed — never invoked, never refused, never
+reported, with every call to it returning somebody's tool list while the
+catalogue went on saying the tool was served. `serve.newPlane` refuses it by
+name, which covers the boot mount and the reload pre-flight both.
+
 **No MCP surface and no second listener.** `ListTools` is on the main listener
 and speaks JSON over Connect's unary shape, not MCP's `tools/list`. Serving
 both from this one projection is the intended next step, and until it happens an

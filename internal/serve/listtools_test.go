@@ -71,22 +71,28 @@ func bankish() *catalogue.Catalogue {
 }
 
 type listing struct {
-	CatalogueDigest string `json:"catalogue_digest"`
-	Tools           []struct {
-		FQN            string   `json:"fqn"`
-		Method         string   `json:"method"`
-		Title          string   `json:"title"`
-		Description    string   `json:"description"`
-		Verb           string   `json:"verb"`
-		ApprovalMode   string   `json:"approval_mode"`
-		MaterialFields []string `json:"material_fields"`
-		Guidance       struct {
-			WhenToUse    string `json:"when_to_use"`
-			WhenNotToUse string `json:"when_not_to_use"`
-			OnError      string `json:"on_error"`
-		} `json:"guidance"`
-		InputSchema map[string]any `json:"input_schema"`
-	} `json:"tools"`
+	CatalogueDigest string       `json:"catalogue_digest"`
+	Tools           []listedTool `json:"tools"`
+}
+
+// listedTool is the wire shape read back, spelled here rather than imported
+// from listtools.go: a test that unmarshalled into the type the handler
+// marshalled from would agree with itself no matter what the JSON names were,
+// and those names are the contract Track D builds against.
+type listedTool struct {
+	FQN            string   `json:"fqn"`
+	Method         string   `json:"method"`
+	Title          string   `json:"title"`
+	Description    string   `json:"description"`
+	Verb           string   `json:"verb"`
+	ApprovalMode   string   `json:"approval_mode"`
+	MaterialFields []string `json:"material_fields"`
+	Guidance       struct {
+		WhenToUse    string `json:"when_to_use"`
+		WhenNotToUse string `json:"when_not_to_use"`
+		OnError      string `json:"on_error"`
+	} `json:"guidance"`
+	InputSchema map[string]any `json:"input_schema"`
 }
 
 func listTools(t *testing.T, h *Handler) (*httptest.ResponseRecorder, listing) {
@@ -254,6 +260,115 @@ func TestAnApproverSeesTheGatedToolWithItsMaterialFields(t *testing.T) {
 	}
 }
 
+// The narrowing does not stop at which TOOLS are listed. A field this caller
+// may not write is absent from the schema it is shown — not present and
+// rejected later — and that is the rule the listing exists to deliver (spec
+// §5.3): a model attempts every field it is shown, a field it cannot write
+// produces a step-3 rejection naming a path it cannot interpret, and it
+// retries identically. An unprojected schema teaches the model to fail.
+//
+// `approver_note` on the fixture message is writable only at RESTRICTED, so
+// two personas looking at the SAME tool must be shown two different schemas.
+func TestTheInputSchemaIsNarrowedToTheCallersOwnFields(t *testing.T) {
+	teller := personaHandler(t, &toolplane.Principal{
+		Subject:   "employee:jdoe",
+		Kind:      toolv1.PrincipalKind_PRINCIPAL_KIND_USER,
+		Clearance: toolv1.Clearance_CLEARANCE_INTERNAL,
+		Verbs:     toolplane.NewVerbSet(toolv1.Verb_VERB_READ, toolv1.Verb_VERB_WRITE),
+	}, &record.Memory{})
+	tw, tg := listTools(t, teller)
+	if tw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", tw.Code, tw.Body.String())
+	}
+	if len(tg.Tools) != 1 {
+		t.Fatalf("%d tools listed, want 1", len(tg.Tools))
+	}
+
+	props, _ := tg.Tools[0].InputSchema["properties"].(map[string]any)
+	if _, ok := props["producer"]; !ok {
+		t.Errorf("the field this caller MAY write is missing too, so the schema is "+
+			"empty rather than narrowed: %v", props)
+	}
+	if _, ok := props["approver_note"]; ok {
+		t.Errorf("approver_note is advertised to a caller who cannot write it; the "+
+			"model will attempt it every turn and be rejected at step 3: %v", props)
+	}
+	for _, r := range required(t, tg.Tools[0].InputSchema) {
+		if r == "approver_note" {
+			t.Error("approver_note is REQUIRED of a caller who may not write it, which " +
+				"describes a tool nobody at this clearance can call")
+		}
+	}
+	// The name itself, anywhere in the body. A field hidden from properties and
+	// left in a description or a required list is still disclosed.
+	if strings.Contains(tw.Body.String(), "approver_note") {
+		t.Errorf("the listing names a field this caller may not write: %s", tw.Body.String())
+	}
+
+	approver := personaHandler(t, &toolplane.Principal{
+		Subject:   "employee:amir",
+		Kind:      toolv1.PrincipalKind_PRINCIPAL_KIND_USER,
+		Clearance: toolv1.Clearance_CLEARANCE_RESTRICTED,
+		Verbs: toolplane.NewVerbSet(toolv1.Verb_VERB_READ, toolv1.Verb_VERB_WRITE,
+			toolv1.Verb_VERB_DESTRUCTIVE),
+		Compartments: compartmentsOf(t, bankish(), "financial"),
+	}, &record.Memory{})
+	aw, ag := listTools(t, approver)
+	if aw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", aw.Code, aw.Body.String())
+	}
+
+	// Same tool, same generation, a different schema. Without this half the
+	// test above would pass against a projection that dropped the field for
+	// everybody.
+	var read *listedTool
+	for i := range ag.Tools {
+		if ag.Tools[i].FQN == "t.v1.get_status" {
+			read = &ag.Tools[i]
+		}
+	}
+	if read == nil {
+		t.Fatalf("the approver was not shown t.v1.get_status: %+v", ag.Tools)
+	}
+	aprops, _ := read.InputSchema["properties"].(map[string]any)
+	if _, ok := aprops["approver_note"]; !ok {
+		t.Errorf("a caller who MAY write approver_note is not shown it, so the "+
+			"projection is not narrowing per caller — it is dropping the field: %v", aprops)
+	}
+	if !containsString(required(t, read.InputSchema), "approver_note") {
+		t.Errorf("approver_note is not required of the caller who may write it: %v",
+			read.InputSchema["required"])
+	}
+}
+
+// required reads the JSON Schema `required` list, which is absent rather than
+// empty when nothing is required.
+func required(t *testing.T, s map[string]any) []string {
+	t.Helper()
+	raw, ok := s["required"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		str, ok := v.(string)
+		if !ok {
+			t.Fatalf("required carries a non-string: %v", v)
+		}
+		out = append(out, str)
+	}
+	return out
+}
+
+func containsString(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // A caller cleared for nothing gets an empty ARRAY, not null and not a 404.
 // A model handed `null` has to special-case it, and a 404 would say the
 // endpoint is missing when the answer is that this caller may use no tools.
@@ -330,6 +445,52 @@ func TestListToolsIsAPostAndIsNotATool(t *testing.T) {
 	}
 }
 
+// A catalogue that declares a tool AT the listing route will not mount.
+//
+// The surface answers this path before it looks a route up, so such a tool
+// would be permanently shadowed: never invoked, never refused, and never
+// reported — the catalogue would say the tool is served and every call to it
+// would come back as somebody else's tool list. Refusing at mount makes that a
+// startup failure naming the tool, which is the one place an author can act on
+// it, and a reload introducing one keeps the previous generation serving.
+func TestACatalogueDeclaringTheListingRouteWillNotMount(t *testing.T) {
+	cat := bankish()
+	cat.Defs = append(cat.Defs, tool.Def{
+		FullMethod:   ListToolsPath,
+		FQN:          "t.v1.shadowed",
+		Name:         "shadowed",
+		Verb:         toolv1.Verb_VERB_READ,
+		MinClearance: toolv1.Clearance_CLEARANCE_INTERNAL,
+		Input:        message(),
+		Output:       message(),
+	})
+	h := chained(&Handler{
+		Store:   &countingStore{c: cat},
+		Invoker: &fakeInvoker{fill: "x"},
+		Log:     discardLogger(),
+		Grants:  refusingGrants{},
+	})
+
+	err := h.Prepare(cat)
+	if err == nil {
+		t.Fatal("a catalogue declaring a tool at the listing route mounted; every call " +
+			"to that tool would silently return a tool list")
+	}
+	if !contains(err.Error(), "t.v1.shadowed") {
+		t.Errorf("the refusal does not name the tool, so an author cannot fix it: %v", err)
+	}
+	if !contains(err.Error(), ListToolsPath) {
+		t.Errorf("the refusal does not name the route it collides with: %v", err)
+	}
+
+	// And the reload pre-flight refuses it too, which is what keeps the
+	// previous generation serving rather than swapping to one that cannot be
+	// governed.
+	if err := h.Check(cat); err == nil {
+		t.Error("the pre-flight admitted it, so a reload would swap to it")
+	}
+}
+
 // The listing and the chain cannot disagree, checked by CALLING every tool
 // the catalogue declares rather than by re-reading the predicate.
 //
@@ -363,6 +524,18 @@ func TestTheListingAndTheChainAgreeToolByTool(t *testing.T) {
 			Kind:      toolv1.PrincipalKind_PRINCIPAL_KIND_USER,
 			Clearance: toolv1.Clearance_CLEARANCE_PUBLIC,
 			Verbs:     toolplane.NewVerbSet(toolv1.Verb_VERB_READ),
+		}},
+		// Cleared for get_status and holding the wrong verb for it. The other
+		// personas differ from the tools they cannot see on clearance AND
+		// compartment AND verb at once, so a listing that read only clearance
+		// would agree with the chain on all of them. This one isolates the
+		// verb: INTERNAL is enough, financial is not needed, and WRITE alone is
+		// the single reason the read tool is omitted.
+		{"a writer who holds no read verb", &toolplane.Principal{
+			Subject:   "service:importer",
+			Kind:      toolv1.PrincipalKind_PRINCIPAL_KIND_SERVICE,
+			Clearance: toolv1.Clearance_CLEARANCE_INTERNAL,
+			Verbs:     toolplane.NewVerbSet(toolv1.Verb_VERB_WRITE),
 		}},
 	} {
 		t.Run(persona.name, func(t *testing.T) {
