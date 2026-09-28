@@ -54,6 +54,12 @@ func valueAt(msg protoreflect.Message, segs []string) (string, error) {
 	if fd == nil {
 		return "", fmt.Errorf("%s has no field %q", msg.Descriptor().FullName(), segs[0])
 	}
+	// A repeated or map field is refused before either branch: descending
+	// into a list panics on Message(), and a list leaf has no single text.
+	// The linter refuses such paths at build; this is the daemon's own guard.
+	if fd.IsList() || fd.IsMap() {
+		return "", fmt.Errorf("%q is repeated or a map; a material path names one value", segs[0])
+	}
 	if len(segs) > 1 {
 		if fd.Kind() != protoreflect.MessageKind {
 			return "", fmt.Errorf("%q is not a message", segs[0])

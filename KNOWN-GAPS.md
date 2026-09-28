@@ -103,7 +103,7 @@ small catalogue against a bucket holding a large bad one carries both.
 
   `agentd/internal/authn` parses the same claim the same way —
   `claims.go:162-172` for the shape and the refusal, `claims.go:69-70` for it
-  not being a hop, `principal.go:206-208` for the copy onto the principal — so
+  not being a hop, `Fold` in `principal.go` for the copy onto the principal — so
   the two processes agree on what a token means.
 
   The row records it. `newEvent` copies `Principal.Execution` onto
@@ -366,15 +366,13 @@ are `checkout`'d and run as processes, never imported, and the `boundaries`
 job re-asserts `go list -deps -test ./...` names neither `garm-ai/devkit`
 nor `garm-ai/sts`, under both tag sets.
 
-**The STS is checked out at `ref: feat/agent-mvp`, not at a release.** The
-endpoints the last three cases drive and the deploy fixtures they read live
-only on that branch, so the job would otherwise build an `sts` that refuses
-to start on the `approve:` block this job writes. That pin is a gap while it
-lasts: a branch ref means this job follows whatever lands there, so a change
-on the STS side can turn this build red without anything changing here — and,
-worse, a case could be made to pass by an edit on that branch rather than by
-the two sides agreeing. It becomes the `v0.3.0` tag when that is cut, and the
-`ref` line in `ci.yml` says so.
+**The STS is checked out at the `v0.3.0` tag.** The endpoints the last three
+cases drive and the deploy fixtures they read first shipped there; an older
+`sts` refuses to start on the `approve:` block this job writes. A tag, not a
+branch, on purpose: a branch ref would make this job follow whatever lands on
+the STS side, and a case could then be made to pass by an edit there rather
+than by the two sides agreeing. The tag is bumped by hand when the suite grows
+a case that needs a newer STS.
 
 What remains unguarded, in seven parts:
 
@@ -459,10 +457,17 @@ vocabulary the suite asserts about itself.
 ## Coverage
 
 `toolplane` is the outlier at 53%, and it is the package that decides
-everything. `cmd/garmd` is at 3%: flag parsing around a listener, with the
-parts worth testing covered where they live — the one test there pins that no
-audit configuration leaves the Sink nil rather than typed-nil, which every
-mount refusal depends on.
+everything. `cmd/garmd` is no longer only flag parsing: at 38% across 29 tests,
+`records`, `trustedIssuers`, `grantVerifier`, `longestGrantAge`, `chainBanner`
+and `catalogueSource` are each tested there, because each one is a seam where a
+wiring mistake produces a process that starts cleanly and enforces less than it
+says. The two that matter most are the ones asserting a NIL interface — no
+audit configuration leaves `Audit` nil, no `--grant-issuer` leaves `Grants`
+nil — because a typed nil in either field would mount exactly the tool the
+refusal exists to stop.
+
+`internal/reload` is tested against an httptest object store with a real S3
+client, and every test there is about a generation that must NOT be served.
 
 The two publishers are at 92% (`internal/audit/jetstream`) and 99%
 (`internal/record/jetstream`), both against a real embedded broker for

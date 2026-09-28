@@ -20,7 +20,7 @@ an `s3://bucket/key` URL; credentials come from the AWS default chain, and
 Adding a tool is a catalogue rebuild rather than a release of this binary —
 and for an `s3://` catalogue, without a restart either; a file catalogue still
 needs one. Identity is the pair `(binary version, catalogue digest)`, reported
-at startup, on the health endpoint and on every ledger event, so *which tools
+at startup and on every ledger event, so *which tools
 is this process serving* stays exactly answerable.
 
 **An `s3://` catalogue is reloaded without a restart, or refused.**
