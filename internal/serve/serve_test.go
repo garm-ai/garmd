@@ -26,6 +26,7 @@ import (
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"github.com/garm-ai/garmd/internal/catalogue"
+	"github.com/garm-ai/garmd/internal/grants"
 	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/tool"
 	"github.com/garm-ai/garmd/internal/toolplane"
@@ -606,4 +607,21 @@ func TestARequestThatCouldNotBeReadIsNeverSentToTheTool(t *testing.T) {
 	if inv.calls.Load() != 0 {
 		t.Error("a truncated request was sent over the hop")
 	}
+}
+
+// refusingGrants always asks for a grant, so the surface's refusal can be
+// inspected without minting one.
+type refusingGrants struct{}
+
+func (refusingGrants) Verify(context.Context, *toolplane.Principal, toolplane.ToolDef, proto.Message) error {
+	return grants.ErrGrantRequired
+}
+
+// recordingGrants captures what the surface handed to step 5.
+type recordingGrants struct{ token atomic.Pointer[string] }
+
+func (g *recordingGrants) Verify(ctx context.Context, _ *toolplane.Principal, _ toolplane.ToolDef, _ proto.Message) error {
+	s := grants.GrantFromContextForTest(ctx)
+	g.token.Store(&s)
+	return nil
 }

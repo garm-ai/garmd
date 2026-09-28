@@ -21,6 +21,11 @@ import (
 // attacker already has), or whatever the next confusion attack uses. Adding
 // an algorithm is a source change, reviewed like anything else — the same
 // friction the governance chain itself applies to adding a step.
+// PermittedAlgorithms is exported so the grant verifier shares this exact
+// list rather than keeping its own. Two allowlists is two things to widen,
+// and the second one is the one nobody remembers to look at.
+var PermittedAlgorithms = permittedAlgorithms
+
 var permittedAlgorithms = []jose.SignatureAlgorithm{
 	jose.ES256, jose.ES384, jose.ES512,
 	jose.RS256, jose.RS384, jose.RS512,
