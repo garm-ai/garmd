@@ -41,19 +41,47 @@ jobs:
           install: true
           cache: true
 
-      # garmd must never depend on devkit, which mints tokens.
+      # garmd must never depend on a token minter — devkit or the STS.
       #
-      # devkit can assert any identity — any clearance, any compartment, any
+      # Either can assert any identity — any clearance, any compartment, any
       # delegation chain. This daemon decides what an identity may DO. The two
       # in one dependency graph means something in a request path can reach a
       # minter, and the reciprocal of this check lives in devkit's own CI.
+      #
+      # Both build configurations, with test imports, because a build tag
+      # hides an import from `go list` completely. conformance_test.go is
+      # //go:build conformance — the single file in this repository most
+      # likely to reach for a minter, and since the conformance job now
+      # drives the STS's own endpoints it is the file where an import would
+      # be most tempting — and an untagged list does not see it at all:
+      #
+      #   go list -f '{{.XTestGoFiles}}' ./internal/conformance/
+      #     [form_minter_test.go run_test.go suite_test.go]
+      #   go list -tags conformance -f '{{.XTestGoFiles}}' ./internal/conformance/
+      #     [conformance_test.go form_minter_test.go run_test.go suite_test.go]
+      #
+      # The constraint is "not in go.mod, not in a _test.go import, not
+      # behind a build tag", so the check runs once per tag set.
       - name: no dependency on the token minter
         run: |
-          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/devkit'; then
-            echo "garmd depends on devkit, which mints identities" >&2
-            exit 1
-          fi
-          echo "ok: garmd cannot reach a token minter"
+          for tags in "" "conformance"; do
+            # The assignment on its own line is the real protection here: a
+            # `go list` that fails inside an `if` condition is swallowed and
+            # reads as a clean check, where under errexit a failing
+            # assignment aborts the step. The empty-output guard below
+            # covers the remaining case — a `go list` that succeeds but
+            # prints nothing is broken, not clean.
+            deps=$(go list -tags "$tags" -deps -test ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/(devkit|sts)'; then
+              echo "::error::garmd has acquired a dependency on a token minter (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: no minter in the dependency graph, untagged or under -tags conformance"
 
       # garmd must never build-depend on a repository that implements tools.
       # A catalogue crosses that line as DATA, loaded at boot — never as an
@@ -119,9 +147,9 @@ jobs:
           echo "clean: garmd depends on no tool runtime"
 
   conformance:
-    name: identity conformance (devkit)
+    name: identity conformance (sts)
     runs-on: ubuntu-latest
-    # Skipped on PRs from forks, and skipped deliberately. The `spec`
+    # Skipped on PRs from forks, and skipped deliberately. The `sts`
     # checkout below needs a secret; a fork PR is handed none, so the job
     # would run, substitute `github.token`, and fail the private checkout
     # with a permissions error that reads like a bug in the contributor's
@@ -141,6 +169,22 @@ jobs:
         with:
           repository: garm-ai/devkit
           path: devkit
+
+      # The service under test. Cloned and RUN, never required — the
+      # boundaries job's "no dependency on a minter" check greps for
+      # garm-ai/sts in `go list -deps -test` under both tag sets, so the
+      # only edge between these two repositories is a TCP connection.
+      #
+      # sts is private, hence the token and hence the fork guard above. The
+      # steps below read $GITHUB_WORKSPACE/sts/deploy/{claims,tuples}.yaml
+      # and build ./cmd/sts from this checkout: the conformance suite is
+      # pinned against the deployment fixtures sts actually ships, not
+      # against a copy of them kept here.
+      - uses: actions/checkout@v5
+        with:
+          repository: garm-ai/sts
+          path: sts
+          token: ${{ secrets.GARM_CI_TOKEN || github.token }}
 
       # The suite for this job lives in this repository at
       # internal/conformance/suites/sts.json, alongside devkit's. Both moved
@@ -202,11 +246,19 @@ jobs:
               - kid: k1
                 pem: \$STS_SIGN_KEY_K1
           issuers:
-            - name: devkit-customer
+            # kind: employee, not customer. The approval endpoint refuses a
+            # non-employee approver by design (approval-grants §4, frame
+            # 12), the STS resolves kind from the ISSUER's configuration,
+            # and devkit serves one fixed \`iss\` — so one issuer entry can
+            # only ever have one kind, and the grant case needs it to be
+            # this one. The customer-side behaviour it displaced (the
+            # instanceAuthorization clearance cap) is pinned by sts's own
+            # TestInstanceAuthorizationAbsentRefusesCustomerTokens.
+            - name: devkit-employee
               iss: https://garmdev.invalid/idp
               jwks: http://127.0.0.1:7450/.well-known/jwks.json
               audience: [garm-customer-idp]
-              kind: customer
+              kind: employee
           clients:
             - id: conformance-client
               keys:
@@ -217,6 +269,11 @@ jobs:
           instanceAuthorization:
             status: absent
             unconfinedCeiling: PUBLIC
+          # POST /approve's grant lifetime. The suite's grant case declares
+          # a tool with max_grant_age_seconds 900, and the tool's own
+          # ceiling is the one that binds — this is only the floor.
+          approve:
+            ttl_seconds: 900
           EOF
           cat /tmp/sts-config.yaml
 

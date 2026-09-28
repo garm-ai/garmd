@@ -142,3 +142,101 @@ func TestLoadSuiteRejectsAnExpectationWithNoSubject(t *testing.T) {
 		t.Fatalf("the error must name subject as what is missing, got: %v", err)
 	}
 }
+
+// A case must assert exactly one thing. Three kinds now (a folded
+// Principal, a refusal, an approval grant) and the "exactly one" rule is
+// what keeps a malformed suite from failing OPEN: a case that asserts
+// nothing passes, and a suite of such cases reports success while checking
+// nothing.
+func TestLoadSuiteRequiresExactlyOneAssertionPerCase(t *testing.T) {
+	for name, body := range map[string]string{
+		"none of the three": `{"name":"x","mint":{"a":"b"}}`,
+		"expect and mintError": `{"name":"x","mint":{"a":"b"},"mintError":true,
+			"expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC"}}`,
+		"expect and grant": `{"name":"x","mint":{"a":"b"},
+			"expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC"},
+			"grant":{"tool":"a.b","subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe"}}`,
+		"mintError and grant": `{"name":"x","mint":{"a":"b"},"mintError":true,
+			"grant":{"tool":"a.b","subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadCase(t, body); err == nil {
+				t.Fatal("LoadSuite accepted a case asserting none or several things")
+			}
+		})
+	}
+}
+
+// A grant case carries no mint params — it drives a different endpoint
+// entirely — so the "asks the minter for nothing" rule must not apply to
+// it, and its own required fields must be checked instead.
+func TestLoadSuiteValidatesAGrantCase(t *testing.T) {
+	good := `{"name":"x","grant":{"tool":"payments.v1.initiate_payment",
+		"subject":"customer:C-8123","approver":"jdoe","approverClearance":"RESTRICTED",
+		"expectApprover":"employee:jdoe","material":{"amount_minor_units":"25000"}}}`
+	if _, err := loadCase(t, good); err != nil {
+		t.Fatalf("LoadSuite refused a well-formed grant case: %v", err)
+	}
+
+	for name, body := range map[string]string{
+		"no tool":            `{"name":"x","grant":{"subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe"}}`,
+		"no subject":         `{"name":"x","grant":{"tool":"a.b","approver":"jdoe","expectApprover":"employee:jdoe"}}`,
+		"no approver":        `{"name":"x","grant":{"tool":"a.b","subject":"customer:C","expectApprover":"employee:jdoe"}}`,
+		"no expectApprover":  `{"name":"x","grant":{"tool":"a.b","subject":"customer:C","approver":"jdoe"}}`,
+		"malformed material": `{"name":"x","grant":{"tool":"a.b","subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe","material":{"a=b":"1"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadCase(t, body); err == nil {
+				t.Fatalf("LoadSuite accepted a grant case with %s", name)
+			}
+		})
+	}
+}
+
+// `execution` is a field of Expect like any other, so a suite naming it must
+// load. Without this the whole exchange-2 half of the sts suite is refused by
+// DisallowUnknownFields before a single token is minted.
+func TestLoadSuiteReadsAnExpectedExecution(t *testing.T) {
+	body := `{"name":"x","mint":{"a":"b"},
+		"expect":{"subject":"employee:jdoe","clearance":"CLEARANCE_INTERNAL",
+		          "execution":"runner:conformance-client"}}`
+	s, err := loadCase(t, body)
+	if err != nil {
+		t.Fatalf("LoadSuite refused a case naming an expected execution: %v", err)
+	}
+	if got := s.Cases[0].Expect.Execution; got != "runner:conformance-client" {
+		t.Fatalf("expect.execution = %q, want runner:conformance-client", got)
+	}
+}
+
+// loadCase wraps one case body in a minimal suite, so these tests read as the
+// case they are about rather than as a suite header repeated five times.
+func loadCase(t *testing.T, caseJSON string) (*conformance.Suite, error) {
+	t.Helper()
+	return conformance.LoadSuite(write(t, `{"issuer":"https://sts.example",`+
+		`"audience":"garm://garmd","cases":[`+caseJSON+`]}`))
+}
+
+// The suites this repository SHIPS must load. Nothing else loads them in an
+// ordinary `go test ./...`: the run that reads them is behind
+// -tags conformance and needs two live services, and the CI job that starts
+// those is skipped on a pull request from a fork. Without this, a misspelled
+// key or an undeclared compartment in suites/*.json is caught by nobody
+// until a maintainer's own build — which, for the one kind of file whose
+// whole job is to be checked, is too late.
+func TestTheShippedSuitesLoad(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("suites", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no suites found; this test would pass while checking nothing")
+	}
+	for _, p := range paths {
+		t.Run(filepath.Base(p), func(t *testing.T) {
+			if _, err := conformance.LoadSuite(p); err != nil {
+				t.Fatalf("a suite this repository ships does not load: %v", err)
+			}
+		})
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/garm-ai/garm/contracts/grant"
 	"github.com/garm-ai/garmd/internal/conformance"
 	jose "github.com/go-jose/go-jose/v4"
 )
@@ -510,5 +511,191 @@ func TestHTTPMinterDoesNotReportAConnectionFailureAsARefusal(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unreachable") {
 		t.Fatalf("the error must say the minter was unreachable, got: %v", err)
+	}
+}
+
+// exec is provenance, and the one claim exchange 2 adds that exchange 1 must
+// never carry. compare asserts it UNCONDITIONALLY: a case naming no execution
+// is asserting the token had no exec claim at all, so a runner-obtained token
+// cannot pass an exchange-1 case silently.
+func TestRunAssertsTheExecutionClaim(t *testing.T) {
+	now := time.Now()
+	key := newECKey(t)
+	withExec := body(now, "employee:jdoe", "CLEARANCE_INTERNAL", nil, []any{"READ"}, nil)
+	withExec["exec"] = map[string]any{"sub": "runner:conformance-client", "iss": "https://minter.test"}
+	m := &fakeMinter{key: key, bodies: map[string]map[string]any{
+		"jdoe": withExec,
+	}}
+	base := func(e *conformance.Expect) *conformance.Suite {
+		return &conformance.Suite{
+			Issuer: "https://minter.test", Audience: "garm",
+			Compartments: []string{"support"},
+			Cases: []conformance.Case{{
+				Name: "jdoe via a runner", Mint: map[string]string{"user": "jdoe"}, Expect: e,
+			}},
+		}
+	}
+
+	res, err := conformance.Run(context.Background(), base(&conformance.Expect{
+		Subject: "employee:jdoe", Clearance: "CLEARANCE_INTERNAL",
+		Verbs: []string{"VERB_READ"}, Execution: "runner:conformance-client",
+	}), m, jwksFor(t, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].Err != nil {
+		t.Fatalf("a case naming the right execution failed: %v", res[0].Err)
+	}
+
+	res, _ = conformance.Run(context.Background(), base(&conformance.Expect{
+		Subject: "employee:jdoe", Clearance: "CLEARANCE_INTERNAL",
+		Verbs: []string{"VERB_READ"},
+	}), m, jwksFor(t, key))
+	if res[0].Err == nil {
+		t.Fatal("a token carrying exec passed a case that names no execution; " +
+			"exec would then go unchecked on every exchange-1 case")
+	}
+	if !strings.Contains(res[0].Err.Error(), "execution") {
+		t.Fatalf("the error must name execution as what disagreed: %v", res[0].Err)
+	}
+}
+
+// fakeGrantMinter is a minter that also issues approvals. In process, because
+// garmd may not import the service that mints them.
+type fakeGrantMinter struct {
+	fakeMinter
+	// approver and material override what the grant records, so a test can
+	// mint a grant that disagrees with what was asked for.
+	approver string
+	material map[string]string
+	// noGrant makes the approval endpoint refuse, as a real one does.
+	noGrant bool
+}
+
+func (f *fakeGrantMinter) Grant(_ context.Context, g conformance.Grant) (string, error) {
+	if f.noGrant {
+		return "", &conformance.RefusalError{Status: http.StatusForbidden, Body: "no"}
+	}
+	approver := f.approver
+	if approver == "" {
+		approver = "employee:" + g.Approver
+	}
+	material := g.Material
+	if f.material != nil {
+		material = f.material
+	}
+	now := time.Now()
+	claims := map[string]any{
+		"iss": "https://minter.test", "aud": "garm",
+		"jti": fmt.Sprintf("g-%d", now.UnixNano()),
+		"iat": now.Unix(), "exp": now.Add(15 * time.Minute).Unix(),
+		"garm_grant": map[string]any{
+			"tool": g.Tool, "subject": g.Subject,
+			"material":              grant.Digest(material),
+			"approver":              approver,
+			"approver_clearance":    g.ApproverClearance,
+			"approver_compartments": g.ApproverCompartments,
+		},
+	}
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.ES256, Key: f.key},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "k1"))
+	if err != nil {
+		return "", err
+	}
+	payload, _ := json.Marshal(claims)
+	obj, err := signer.Sign(payload)
+	if err != nil {
+		return "", err
+	}
+	return obj.CompactSerialize()
+}
+
+func grantSuite() *conformance.Suite {
+	return &conformance.Suite{
+		Issuer: "https://minter.test", Audience: "garm",
+		Compartments: []string{"financial"},
+		Cases: []conformance.Case{{
+			Name: "an approval this daemon accepts",
+			Grant: &conformance.Grant{
+				Approver: "jdoe", ApproverClearance: "RESTRICTED",
+				ApproverCompartments:     []string{"financial"},
+				Tool:                     "payments.v1.initiate_payment",
+				Subject:                  "employee:jdoe",
+				Material:                 map[string]string{"amount_minor_units": "25000"},
+				ToolApproverMinClearance: "RESTRICTED",
+				ToolApproverCompartments: []string{"financial"},
+				ToolMaxGrantAgeSeconds:   900,
+				ExpectApprover:           "employee:jdoe",
+			},
+		}},
+	}
+}
+
+func TestRunGrantCasePassesWhenThisDaemonsVerifierAccepts(t *testing.T) {
+	key := newECKey(t)
+	m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}}
+	res, err := conformance.Run(context.Background(), grantSuite(), m, jwksFor(t, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].Err != nil {
+		t.Fatalf("a grant this daemon's own verifier accepts was reported as a failure: %v", res[0].Err)
+	}
+}
+
+// The half only this harness can see: the digest must be over the values the
+// issuer was GIVEN. An issuer digesting something else authorises a call the
+// approver never saw, and every check inside grants.Verifier passes anyway —
+// there is no request message here to re-extract from.
+func TestRunGrantCaseFailsOnADigestOverOtherValues(t *testing.T) {
+	key := newECKey(t)
+	m := &fakeGrantMinter{
+		fakeMinter: fakeMinter{key: key},
+		material:   map[string]string{"amount_minor_units": "1"},
+	}
+	res, _ := conformance.Run(context.Background(), grantSuite(), m, jwksFor(t, key))
+	if res[0].Err == nil {
+		t.Fatal("a grant digesting values nobody presented passed")
+	}
+	if !strings.Contains(res[0].Err.Error(), "material") {
+		t.Fatalf("the error must name the material digest: %v", res[0].Err)
+	}
+}
+
+// The approver is the one value the issuer DERIVES rather than copies — from
+// the verified token's sub and the issuer's configured kind — so it is worth
+// asserting separately from what the verifier already checks.
+func TestRunGrantCaseFailsOnAnApproverItDidNotDerive(t *testing.T) {
+	key := newECKey(t)
+	m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}, approver: "employee:somebody-else"}
+	res, _ := conformance.Run(context.Background(), grantSuite(), m, jwksFor(t, key))
+	if res[0].Err == nil {
+		t.Fatal("a grant recording an approver the issuer never verified passed")
+	}
+	if !strings.Contains(res[0].Err.Error(), "approver") {
+		t.Fatalf("the error must name the approver: %v", res[0].Err)
+	}
+}
+
+// A grant case against a minter that cannot issue one must FAIL, never skip:
+// a skipped case is a suite reporting ok about something it did not check.
+func TestRunGrantCaseFailsAgainstATokenOnlyMinter(t *testing.T) {
+	key := newECKey(t)
+	res, _ := conformance.Run(context.Background(), grantSuite(), &fakeMinter{key: key}, jwksFor(t, key))
+	if res[0].Err == nil {
+		t.Fatal("a grant case against a token-only minter was reported as a pass")
+	}
+}
+
+// An approval endpoint that refuses fails the case too. A grant case asserts
+// that an approval CAN be obtained and verified, so there is no refusal it is
+// satisfied by.
+func TestRunGrantCaseFailsWhenTheApprovalEndpointRefuses(t *testing.T) {
+	key := newECKey(t)
+	m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}, noGrant: true}
+	res, _ := conformance.Run(context.Background(), grantSuite(), m, jwksFor(t, key))
+	if res[0].Err == nil {
+		t.Fatal("a refused approval was reported as a pass")
 	}
 }

@@ -4,32 +4,94 @@
   "compartments": ["financial", "pii-contact", "support"],
   "cases": [
     {
-      "name": "customer C direct via order-assistant: capped by instanceAuthorization, narrowed further by the agent",
+      "name": "exchange 1: employee jdoe via order-assistant, folded down to what the agent also holds",
       "mint": {
         "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-        "subject_user": "C",
+        "subject_user": "jdoe",
         "subject_tenant": "acme",
         "agent": "order-assistant"
       },
       "expect": {
-        "subject": "customer:C",
+        "subject": "employee:jdoe",
         "actor": "agent:order-assistant",
         "kind": "PRINCIPAL_KIND_USER",
-        "clearance": "CLEARANCE_PUBLIC",
-        "compartments": [],
+        "clearance": "CLEARANCE_INTERNAL",
+        "compartments": ["pii-contact"],
         "verbs": ["VERB_READ"],
-        "toolSets": ["self-service"]
+        "toolSets": ["support"]
       }
     },
     {
-      "name": "customer Z: refused, no can_invoke tuple names this customer for this agent",
+      "name": "exchange 1: employee zztop refused, no can_invoke tuple names this employee for this agent",
       "mint": {
         "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-        "subject_user": "Z",
+        "subject_user": "zztop",
         "subject_tenant": "acme",
         "agent": "order-assistant"
       },
       "mintError": true
+    },
+    {
+      "name": "exchange 2: the runner obtains jdoe's token, the fold carries exec, and no act link names the runner",
+      "mint": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "on_behalf_of": "employee:jdoe",
+        "subject_kind": "USER",
+        "agent": "order-assistant",
+        "tenant": "acme"
+      },
+      "expect": {
+        "subject": "employee:jdoe",
+        "actor": "agent:order-assistant",
+        "kind": "PRINCIPAL_KIND_USER",
+        "clearance": "CLEARANCE_INTERNAL",
+        "compartments": ["pii-contact"],
+        "verbs": ["VERB_READ"],
+        "toolSets": ["support"],
+        "execution": "runner:conformance-client"
+      }
+    },
+    {
+      "name": "exchange 2: refused, no can_run tuple names this runner for this agent",
+      "mint": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "on_behalf_of": "employee:jdoe",
+        "subject_kind": "USER",
+        "agent": "ghost-assistant",
+        "tenant": "acme"
+      },
+      "mintError": true
+    },
+    {
+      "name": "exchange 2: refused, on_behalf_of carries no type prefix",
+      "mint": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "on_behalf_of": "jdoe",
+        "subject_kind": "USER",
+        "agent": "order-assistant",
+        "tenant": "acme"
+      },
+      "mintError": true
+    },
+    {
+      "name": "approve: a grant this daemon's own verifier accepts, bound to the values presented",
+      "grant": {
+        "approver": "jdoe",
+        "approverTenant": "acme",
+        "approverClearance": "RESTRICTED",
+        "approverCompartments": ["financial"],
+        "tool": "payments.v1.initiate_payment",
+        "subject": "employee:jdoe",
+        "material": {
+          "amount_minor_units": "25000",
+          "beneficiary_iban": "GB29NWBK60161331926819",
+          "currency_code": "GBP"
+        },
+        "toolApproverMinClearance": "RESTRICTED",
+        "toolApproverCompartments": ["financial"],
+        "toolMaxGrantAgeSeconds": 900,
+        "expectApprover": "employee:jdoe"
+      }
     }
   ]
 }

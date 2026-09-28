@@ -330,28 +330,56 @@ and speaks JSON over Connect's unary shape, not MCP's `tools/list`. Serving
 both from this one projection is the intended next step, and until it happens an
 MCP client has nothing here to talk to.
 
-## Drift with devkit is caught, for the personas devkit.json covers
+## Drift with the STS is caught, for the cases sts.json covers
 
-`garm-ai/devkit` mints the dev tokens this verifier reads, and neither may
-import the other: a module that can assert any identity must not be in the
-dependency graph of one that decides what an identity may do. CI asserts it
-from both sides.
+`garm-ai/sts` mints the tokens and the approval grants this verifier reads,
+and neither may import the other: a module that can assert any identity must
+not be in the dependency graph of one that decides what an identity may do.
+CI asserts it from both sides.
 
-The seam between minting and verifying is a cross-repository CI check now,
-not a same-process test. `internal/conformance` loads a suite of cases from
-`spec/conformance/identity/devkit.json`, drives the running devkit IdP over
-HTTP to mint a token per case, verifies it with this repository's own
-`internal/authn`, and asserts the resulting `Principal` against the case's
-expectation. The `conformance` job in `.github/workflows/ci.yml` starts the
-dev IdP, runs that suite, and fails the build on any disagreement — with no
-build-time edge between the two repositories: devkit is `checkout`'d and run
-as a process, never imported, and a dedicated step re-asserts `go list -deps
--test ./...` never names `garm-ai/devkit`.
+The seam between minting and verifying is a cross-repository CI check, not a
+same-process test. `internal/conformance` loads a suite of cases from
+`internal/conformance/suites/sts.json`, drives the running service over HTTP
+per case, and checks the answer with this repository's own code. Three kinds
+of case, and each asserts exactly one thing:
 
-What remains unguarded, in four parts:
+- **`expect`** — the STS's `POST /token` mints, `internal/authn` verifies and
+  folds, and the resulting `Principal` is compared field by field. `subject`,
+  `actor`, `clearance`, `compartments`, `verbs`, `toolSets`, `dropped` and
+  `execution` are all asserted whether the case names them or not, so a case
+  that omits `execution` is asserting the token carried no `exec` claim at
+  all — which is what pins the runner's provenance to the governed door and
+  nowhere else.
+- **`mintError`** — the STS REFUSES. Only a `*RefusalError` satisfies it: a
+  dead port asserts nothing, and accepting one would make a suite of
+  refusal cases pass against a service that was never running.
+- **`grant`** — the STS's `POST /approve` issues an approval and this
+  daemon's own `internal/grants.Verifier` must accept it, followed by a
+  direct assertion that the digest is over the values the issuer was given
+  and that the approver recorded is the one it derived from the verified
+  token.
 
-**The suite covers the five personas in `devkit.json` and no others**, so a
-claim shape only a different persona would exercise is still unchecked.
+The `conformance` job in `.github/workflows/ci.yml` starts devkit as the
+upstream IdP, starts the STS trusting it, runs the suite and fails the build
+on any disagreement — with no build-time edge between the repositories: both
+are `checkout`'d and run as processes, never imported, and the `boundaries`
+job re-asserts `go list -deps -test ./...` names neither `garm-ai/devkit`
+nor `garm-ai/sts`, under both tag sets.
+
+What remains unguarded, in five parts:
+
+**The suite covers the cases in `sts.json` and no others**, so a claim shape
+only a different persona or a different tool declaration would exercise is
+still unchecked. `devkit.json` is still shipped beside it and is no longer
+driven by any job.
+
+**A grant case checks the issuer's half of material binding and not
+garmd's.** `grants.Verifier.checkMaterial` re-extracts material values from
+the actual request message using its descriptor; a suite file carries no
+proto message and no descriptor, so the harness declares a `ToolDef` with no
+`MaterialFields` — which makes that check a no-op — and asserts the digest
+directly instead. Re-extraction from a real request is covered by
+`internal/grants`'s own tests, never by this job.
 
 **The suites live in this repository.** `internal/conformance/suites/` holds
 `devkit.json` and `sts.json`. They were in the private `spec` repo, which made
@@ -360,6 +388,14 @@ this a public repository's CI reaching into a private one: it needed a
 all, so the job had to skip there. Drift was caught for maintainers and not for
 outside contributors — the people most likely to change a claim shape without
 knowing what depends on it.
+
+The suites moved; the job did not stop needing a secret. `garm-ai/sts` is
+itself private, so the `conformance` job still checks it out with
+`GARM_CI_TOKEN` and is still skipped on a pull request from a fork. What the
+move bought is that the FILES are readable and reviewable by everyone, and
+that `TestTheShippedSuitesLoad` — an ordinary `go test ./...` — refuses a
+malformed one on every build, fork PRs included. The tokens behind them are
+still only minted for maintainers.
 
 Moving them here costs the arrangement its third party. The verifier now owns
 the expectations it verifies against, so a fold bug and a matching expectation

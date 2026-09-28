@@ -468,3 +468,187 @@ func TestFormMinterSubjectTokenFetchFailureIsNotARefusal(t *testing.T) {
 		t.Fatalf("an upstream IdP failure was reported as a *RefusalError, which must mean the STS refused: %v", err)
 	}
 }
+
+// approveServers stands in for the two services a grant case touches: the
+// upstream IdP that mints the APPROVER's own bearer, and the STS's approval
+// endpoint. Both in process, because garmd may not import either.
+type approveServers struct {
+	upstream *httptest.Server
+	sts      *httptest.Server
+
+	upstreamQuery url.Values // what the approver's token was asked for
+	authHeader    string     // what /approve saw in Authorization
+	contentType   string
+	method        string
+	body          map[string]any
+}
+
+func startApproveServers(t *testing.T, approveStatus int, approveBody string, upstreamStatus int) *approveServers {
+	t.Helper()
+	s := &approveServers{}
+	s.upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.upstreamQuery = r.URL.Query()
+		if upstreamStatus != http.StatusOK {
+			http.Error(w, "upstream is unwell", upstreamStatus)
+			return
+		}
+		fmt.Fprintln(w, "approver.bearer.token")
+	}))
+	t.Cleanup(s.upstream.Close)
+	s.sts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.method = r.Method
+		s.authHeader = r.Header.Get("Authorization")
+		s.contentType = r.Header.Get("Content-Type")
+		_ = json.NewDecoder(r.Body).Decode(&s.body)
+		if approveStatus != http.StatusOK {
+			http.Error(w, "denied", approveStatus)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, approveBody)
+	}))
+	t.Cleanup(s.sts.Close)
+	return s
+}
+
+func grantCase() conformance.Grant {
+	return conformance.Grant{
+		Approver: "jdoe", ApproverTenant: "acme", ApproverClearance: "RESTRICTED",
+		ApproverCompartments: []string{"financial", "pii-contact"},
+		Tool:                 "payments.v1.initiate_payment",
+		Subject:              "employee:jdoe",
+		Material:             map[string]string{"amount_minor_units": "25000"},
+		ExpectApprover:       "employee:jdoe",
+	}
+}
+
+// The approval request is the one place the calling service and the human
+// are BOTH authenticated, and by different credentials: the service by its
+// client_assertion in the body, the human by their own bearer in the header.
+// Sending the human's token as the service's credential, or the reverse,
+// would be an approval attributed to the wrong party.
+func TestFormMinterGrantPostsTheApprovalRequest(t *testing.T) {
+	key, _ := newFormMinterKey(t)
+	s := startApproveServers(t, http.StatusOK, `{"grant":"g.r.t","expires_in":900}`, http.StatusOK)
+	m := conformance.FormMinter{
+		BaseURL: s.sts.URL, ClientID: "conformance-client",
+		Audience: "https://sts.example/token", Key: key, UpstreamURL: s.upstream.URL,
+	}
+
+	got, err := m.Grant(context.Background(), grantCase())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "g.r.t" {
+		t.Fatalf("grant = %q, want the token from the response envelope", got)
+	}
+	if s.method != http.MethodPost {
+		t.Errorf("method = %s, want POST", s.method)
+	}
+	if !strings.HasPrefix(s.contentType, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", s.contentType)
+	}
+	if s.authHeader != "Bearer approver.bearer.token" {
+		t.Errorf("Authorization = %q; the APPROVER's own bearer belongs here, "+
+			"not the calling service's assertion", s.authHeader)
+	}
+	if s.body["tool"] != "payments.v1.initiate_payment" || s.body["subject"] != "employee:jdoe" {
+		t.Errorf("tool/subject: %+v", s.body)
+	}
+	material, _ := s.body["material"].(map[string]any)
+	if material["amount_minor_units"] != "25000" {
+		t.Errorf("material = %+v; the issuer digests what it is GIVEN, so the "+
+			"values must arrive verbatim", s.body["material"])
+	}
+	assertion, _ := s.body["client_assertion"].(string)
+	if assertion == "" {
+		t.Fatal("no client_assertion in the approval request; the calling service must authenticate")
+	}
+	if claims := decodeAssertionPayload(t, assertion); claims["aud"] != "https://sts.example/token" {
+		t.Errorf("client_assertion aud = %v, want the token endpoint's own name", claims["aud"])
+	}
+	if s.body["client_assertion_type"] != "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" {
+		t.Errorf("client_assertion_type = %v", s.body["client_assertion_type"])
+	}
+}
+
+// The issuer RECORDS the approver's authority rather than resolving it, so
+// the case's declared clearance and compartments have to reach the upstream
+// IdP that mints the approver's token — there is nowhere else to put them,
+// and a grant recording no authority is one this daemon refuses for a reason
+// that names the wrong system.
+func TestFormMinterGrantAsksUpstreamForTheApproversAuthority(t *testing.T) {
+	key, _ := newFormMinterKey(t)
+	s := startApproveServers(t, http.StatusOK, `{"grant":"g.r.t","expires_in":900}`, http.StatusOK)
+	m := conformance.FormMinter{
+		BaseURL: s.sts.URL, ClientID: "conformance-client",
+		Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
+	}
+	if _, err := m.Grant(context.Background(), grantCase()); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]string{
+		"sub": "jdoe", "tenant": "acme", "clearance": "RESTRICTED",
+		"compartments": "financial,pii-contact",
+	} {
+		if got := s.upstreamQuery.Get(k); got != want {
+			t.Errorf("upstream ?%s= %q, want %q", k, got, want)
+		}
+	}
+}
+
+// Same contract as Token's: the service under test answered and said no.
+func TestFormMinterGrantReportsARefusalAsARefusalError(t *testing.T) {
+	key, _ := newFormMinterKey(t)
+	s := startApproveServers(t, http.StatusForbidden, "", http.StatusOK)
+	m := conformance.FormMinter{
+		BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
+	}
+	_, err := m.Grant(context.Background(), grantCase())
+	var refusal *conformance.RefusalError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("err = %v, want a *RefusalError", err)
+	}
+	if refusal.Status != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", refusal.Status)
+	}
+}
+
+// And the mirror: an upstream IdP that never answered says nothing at all
+// about the approval endpoint, so it must never read as a refusal.
+func TestFormMinterGrantUpstreamFailureIsNotARefusal(t *testing.T) {
+	key, _ := newFormMinterKey(t)
+	s := startApproveServers(t, http.StatusOK, `{"grant":"g"}`, http.StatusInternalServerError)
+	m := conformance.FormMinter{
+		BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
+	}
+	_, err := m.Grant(context.Background(), grantCase())
+	if err == nil {
+		t.Fatal("an upstream IdP that refused the approver's token produced no error")
+	}
+	var refusal *conformance.RefusalError
+	if errors.As(err, &refusal) {
+		t.Fatal("an upstream failure was reported as a refusal by the service under test")
+	}
+}
+
+func TestFormMinterGrantWithoutUpstreamURLFails(t *testing.T) {
+	key, _ := newFormMinterKey(t)
+	s := startApproveServers(t, http.StatusOK, `{"grant":"g"}`, http.StatusOK)
+	m := conformance.FormMinter{BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key}
+	if _, err := m.Grant(context.Background(), grantCase()); err == nil {
+		t.Fatal("a grant case ran without an upstream IdP to mint the approver's token")
+	}
+}
+
+// An approval response with no grant in it is a 200 that granted nothing.
+func TestFormMinterGrantRejectsAnEmptyEnvelope(t *testing.T) {
+	key, _ := newFormMinterKey(t)
+	s := startApproveServers(t, http.StatusOK, `{"expires_in":900}`, http.StatusOK)
+	m := conformance.FormMinter{
+		BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
+	}
+	if _, err := m.Grant(context.Background(), grantCase()); err == nil {
+		t.Fatal("a 200 carrying no grant was accepted")
+	}
+}

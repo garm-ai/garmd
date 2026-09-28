@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
@@ -53,6 +54,17 @@ import (
 // reserved subjectTenantParam ("subject_tenant") becomes its tenant. Both
 // are consumed here and never forwarded to the STS's own POST body: neither
 // is part of RFC 8693, and the STS has no field that would read them.
+//
+// # Two endpoints
+//
+// FormMinter drives both halves of the STS a suite can assert about: POST
+// /token via Token, and POST /approve via Grant. Both hang off the same
+// BaseURL and both authenticate with the same client_assertion — one
+// registered client id and one key pair, not two — because they are two
+// endpoints of one service and a second credential would be a second thing
+// to rotate. Grant additionally carries the APPROVER'S own bearer in the
+// Authorization header: the calling service says who it is in the body, and
+// the human says who they are in the header.
 type FormMinter struct {
 	// BaseURL is the STS's origin. Requests go to BaseURL+"/token".
 	BaseURL string
@@ -97,6 +109,12 @@ const subjectTenantParam = "subject_tenant"
 // subjectTokenParam is the RFC 8693 form field the fetched upstream token is
 // sent to the STS under.
 const subjectTokenParam = "subject_token"
+
+// clientAssertionTypeJWTBearer is the RFC 7521 §4.2 name for the only kind
+// of assertion either endpoint accepts. Sent on both, from one constant: two
+// spellings of this string is a call authenticated at one endpoint and
+// refused at the other for a reason that reads as a key problem.
+const clientAssertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
 // tokenResponse is the STS's JSON envelope. Only AccessToken is consumed by
 // Token; the rest is decoded anyway because a caller inspecting the raw
@@ -212,7 +230,7 @@ func (m FormMinter) Token(ctx context.Context, params map[string]string) (string
 	}
 
 	form.Set("client_assertion", assertion)
-	form.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+	form.Set("client_assertion_type", clientAssertionTypeJWTBearer)
 
 	u := strings.TrimSuffix(m.BaseURL, "/") + "/token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(form.Encode()))
@@ -256,21 +274,29 @@ func (m FormMinter) Token(ctx context.Context, params map[string]string) (string
 }
 
 // fetchSubjectToken asks the upstream IdP for a fresh token to present as
-// subject_token. It is deliberately a GET whose raw body IS the token — the
-// same shape HTTPMinter itself drives against devkit — because the upstream
-// IdP in this codebase's own conformance run is devkit, and this is the one
-// form of its /token endpoint that attaches a tenant claim (see the type
-// doc comment for why the persona ?user= form cannot be used here).
-//
-// A non-200 here is never a *RefusalError: that type means specifically
-// "the STS was reached and declined this exchange," and the upstream IdP is
-// a different service entirely. See Token's doc comment.
+// subject_token. See fetchUpstreamToken for the shape and for why a failure
+// here is never a *RefusalError.
 func (m FormMinter) fetchSubjectToken(ctx context.Context, user, tenant string) (string, error) {
 	q := url.Values{}
 	q.Set("sub", user)
 	if tenant != "" {
 		q.Set("tenant", tenant)
 	}
+	return m.fetchUpstreamToken(ctx, q)
+}
+
+// fetchUpstreamToken is a GET whose raw body IS the token — the same shape
+// HTTPMinter itself drives against devkit — because the upstream IdP in this
+// codebase's own conformance run is devkit, and this is the form of its
+// /token endpoint that attaches the claims these cases need: a tenant for
+// the exchange (see the type doc comment for why the persona ?user= form
+// cannot be used here), and a garm claim carrying clearance and compartments
+// for an approver.
+//
+// A non-200 here is never a *RefusalError: that type means specifically
+// "the service under test was reached and declined," and the upstream IdP is
+// a different service entirely. See Token's doc comment.
+func (m FormMinter) fetchUpstreamToken(ctx context.Context, q url.Values) (string, error) {
 	u := strings.TrimSuffix(m.UpstreamURL, "/") + "/token?" + q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -295,10 +321,108 @@ func (m FormMinter) fetchSubjectToken(ctx context.Context, user, tenant string) 
 	}
 	tok := strings.TrimSpace(string(b))
 	if tok == "" {
-		return "", fmt.Errorf("upstream IdP returned an empty subject token")
+		return "", fmt.Errorf("upstream IdP returned an empty token")
 	}
 	return tok, nil
 }
+
+// grantResponse is the approval endpoint's JSON envelope.
+type grantResponse struct {
+	Grant     string `json:"grant"`
+	ExpiresIn int64  `json:"expires_in"`
+}
+
+// Grant drives POST /approve: a JSON body carrying the calling service's
+// client_assertion and the approval request, and the APPROVER'S own bearer
+// in the Authorization header.
+//
+// The approver's token is fetched from the upstream IdP first, with the
+// clearance and compartments the case declares, because the issuer RECORDS
+// the approver's authority rather than resolving it — so the case has to
+// say what that authority is, and the only place to put it is the token.
+//
+// A non-200 from the approval endpoint is a *RefusalError, exactly as
+// Token's contract requires; a failure fetching the approver's token is an
+// ordinary wrapped error, because a case that never reached the service
+// under test asserts nothing about it.
+func (m FormMinter) Grant(ctx context.Context, g Grant) (string, error) {
+	if m.UpstreamURL == "" {
+		return "", fmt.Errorf("conformance: a grant case needs an approver's token and " +
+			"FormMinter has no UpstreamURL configured")
+	}
+	q := url.Values{}
+	q.Set("sub", g.Approver)
+	if g.ApproverTenant != "" {
+		q.Set("tenant", g.ApproverTenant)
+	}
+	if g.ApproverClearance != "" {
+		q.Set("clearance", g.ApproverClearance)
+	}
+	if len(g.ApproverCompartments) > 0 {
+		q.Set("compartments", strings.Join(g.ApproverCompartments, ","))
+	}
+	bearer, err := m.fetchUpstreamToken(ctx, q)
+	if err != nil {
+		return "", fmt.Errorf("conformance: fetching the approver's token from the upstream IdP: %w", err)
+	}
+
+	assertion, err := m.clientAssertion()
+	if err != nil {
+		return "", err
+	}
+	// Never nil: the approval endpoint digests what it is given, and `null`
+	// where an object belongs is a request shape nothing on either side has
+	// a reason to accept.
+	material := g.Material
+	if material == nil {
+		material = map[string]string{}
+	}
+	body, err := json.Marshal(map[string]any{
+		"client_assertion":      assertion,
+		"client_assertion_type": clientAssertionTypeJWTBearer,
+		"tool":                  g.Tool,
+		"subject":               g.Subject,
+		"material":              material,
+	})
+	if err != nil {
+		return "", fmt.Errorf("conformance: encoding the approval request: %w", err)
+	}
+
+	u := strings.TrimSuffix(m.BaseURL, "/") + "/approve"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+bearer)
+
+	c := m.Client
+	if c == nil {
+		c = &http.Client{Timeout: 10 * time.Second}
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("approval endpoint unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", &RefusalError{Status: resp.StatusCode, Body: strings.TrimSpace(string(b))}
+	}
+	var gr grantResponse
+	if err := json.Unmarshal(b, &gr); err != nil {
+		return "", fmt.Errorf("conformance: decoding the approval response: %w (body: %s)", err, truncateBody(b))
+	}
+	if gr.Grant == "" {
+		return "", fmt.Errorf("conformance: approval response has no grant (body: %s)", truncateBody(b))
+	}
+	return gr.Grant, nil
+}
+
+var _ GrantMinter = FormMinter{}
 
 // truncateBody bounds a response body for inclusion in an error message. A
 // 200 that fails to decode is exactly the case where an operator needs to

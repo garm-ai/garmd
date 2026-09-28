@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,11 +10,17 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	jose "github.com/go-jose/go-jose/v4"
+
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	"github.com/garm-ai/garm/contracts/grant"
 	"github.com/garm-ai/garm/policy"
 	"github.com/garm-ai/garmd/internal/authn"
+	"github.com/garm-ai/garmd/internal/grants"
+	"github.com/garm-ai/garmd/internal/replay"
 	"github.com/garm-ai/garmd/internal/toolplane"
 )
 
@@ -26,6 +33,14 @@ import (
 // RefusalError.
 type Minter interface {
 	Token(ctx context.Context, params map[string]string) (string, error)
+}
+
+// GrantMinter is a minter that also issues APPROVAL grants. Optional,
+// because a minter may implement the token endpoint and not the approval
+// one — devkit does — and a suite carrying a grant case against such a
+// minter must fail loudly rather than skip.
+type GrantMinter interface {
+	Grant(ctx context.Context, g Grant) (string, error)
 }
 
 // RefusalError is a minter that answered and said no.
@@ -116,12 +131,18 @@ func Run(ctx context.Context, s *Suite, m Minter, jwksURL string) ([]Result, err
 
 	out := make([]Result, 0, len(s.Cases))
 	for _, c := range s.Cases {
-		out = append(out, Result{Case: c.Name, Err: runCase(ctx, c, m, v, reg)})
+		out = append(out, Result{Case: c.Name, Err: runCase(ctx, c, m, v, reg, s, jwksURL)})
 	}
 	return out, nil
 }
 
-func runCase(ctx context.Context, c Case, m Minter, v *authn.Verifier, reg *policy.Registry) error {
+func runCase(
+	ctx context.Context, c Case, m Minter, v *authn.Verifier, reg *policy.Registry,
+	s *Suite, jwksURL string,
+) error {
+	if c.Grant != nil {
+		return runGrantCase(ctx, c, m, s, jwksURL)
+	}
 	tok, mintErr := m.Token(ctx, c.Mint)
 	if c.MintError {
 		if mintErr == nil {
@@ -161,6 +182,14 @@ func compare(e *Expect, p *toolplane.Principal, dropped []string, reg *policy.Re
 	}
 	if p.Actor != e.Actor {
 		bad = append(bad, fmt.Sprintf("actor: got %q want %q", p.Actor, e.Actor))
+	}
+	// Unconditional, like subject and actor. A case that names no execution
+	// is asserting the token carried NO exec claim, which is what pins
+	// "exec on the governed-door rows and nowhere else" — an optional check
+	// here would let a runner-obtained token pass an exchange-1 case
+	// silently.
+	if p.Execution != e.Execution {
+		bad = append(bad, fmt.Sprintf("execution: got %q want %q", p.Execution, e.Execution))
 	}
 	// Kind is the one field left optional, and deliberately: it is
 	// attribution rather than authority, so a suite that does not name it is
@@ -252,4 +281,129 @@ func verbNames(vs toolplane.VerbSet) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// memSpent is a per-run replay cache. It is the harness's own, not the
+// daemon's: a conformance run checks that a grant VERIFIES, and single-use
+// is garmd's own test's subject (internal/grants), not a property a minter
+// can be conformant or non-conformant about.
+type memSpent struct {
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+func (c *memSpent) Spend(_ context.Context, id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.seen == nil {
+		c.seen = map[string]bool{}
+	}
+	if c.seen[id] {
+		return replay.ErrAlreadySpent
+	}
+	c.seen[id] = true
+	return nil
+}
+
+// Retention reports a window longer than any grant a suite can declare, so
+// CheckRetention never refuses this cache. It holds entries for the life of
+// the process, which for one conformance run is the whole window.
+func (c *memSpent) Retention() time.Duration { return 24 * time.Hour }
+
+var _ replay.Cache = (*memSpent)(nil)
+
+// runGrantCase obtains an approval grant from the minter and checks that
+// THIS daemon's own verifier accepts it — the same code path a real call
+// would take at step 5, with one exception: the tool declares no material
+// fields, because re-extraction needs a real request message and a suite
+// file carries none. The digest is asserted directly instead, which is the
+// half that belongs to the issuer. Re-extraction from a real request is
+// internal/grants's own test's subject.
+func runGrantCase(ctx context.Context, c Case, m Minter, s *Suite, jwksURL string) error {
+	gm, ok := m.(GrantMinter)
+	if !ok {
+		return fmt.Errorf("this case asks for an approval grant and the configured " +
+			"minter shape cannot issue one; a grant case against a token-only minter " +
+			"must fail rather than be skipped")
+	}
+	g := *c.Grant
+
+	raw, err := gm.Grant(ctx, g)
+	if err != nil {
+		return fmt.Errorf("minting the grant: %w", err)
+	}
+
+	def := toolplane.ToolDef{
+		FQN:                  g.Tool,
+		ApprovalMode:         toolv1.Approval_MODE_GRANT,
+		ApproverMinClearance: clearanceValue(g.ToolApproverMinClearance),
+		ApproverCompartments: g.ToolApproverCompartments,
+		MaxGrantAge:          time.Duration(g.ToolMaxGrantAgeSeconds) * time.Second,
+	}
+	v := &grants.Verifier{
+		Keys:     authn.NewKeySet(authn.KeySetConfig{URL: jwksURL}),
+		Issuers:  []string{s.Issuer},
+		Audience: s.Audience,
+		Spent:    &memSpent{},
+	}
+	p := &toolplane.Principal{Subject: g.Subject}
+	if err := v.Verify(grants.WithGrant(ctx, raw), p, def, nil); err != nil {
+		return fmt.Errorf("this daemon's own grant verifier refused the grant: %w", err)
+	}
+
+	// Signature, issuer, audience, jti, tool, subject, expiry, age and the
+	// approver's authority are all checked above. What remains is what only
+	// this harness can see: that the digest is over the values the ISSUER
+	// WAS GIVEN, and that the approver recorded is the one derived from the
+	// verified token rather than a field the caller supplied.
+	claims, err := grantBody(raw)
+	if err != nil {
+		return err
+	}
+	if want := grant.Digest(g.Material); claims.Material != want {
+		return fmt.Errorf("garm_grant.material = %q, want %q — the digest must be over the "+
+			"values presented and nothing else, or a grant authorises a call the approver never saw",
+			claims.Material, want)
+	}
+	if claims.Approver != g.ExpectApprover {
+		return fmt.Errorf("garm_grant.approver = %q, want %q", claims.Approver, g.ExpectApprover)
+	}
+	return nil
+}
+
+// grantClaimBody is the half of garm_grant this harness reads directly. The
+// verifier has already checked the signature by the time this runs, so the
+// unverified payload is safe to decode here.
+type grantClaimBody struct {
+	Material string `json:"material"`
+	Approver string `json:"approver"`
+}
+
+func grantBody(raw string) (*grantClaimBody, error) {
+	sig, err := jose.ParseSigned(raw, authn.PermittedAlgorithms)
+	if err != nil {
+		return nil, fmt.Errorf("the grant is not a well-formed token: %w", err)
+	}
+	var body struct {
+		Grant grantClaimBody `json:"garm_grant"`
+	}
+	// Unverified is correct here and only here: Verify above already
+	// checked this exact token's signature against the served JWKS.
+	if err := json.Unmarshal(sig.UnsafePayloadWithoutVerification(), &body); err != nil {
+		return nil, fmt.Errorf("the grant's body is not JSON: %w", err)
+	}
+	return &body.Grant, nil
+}
+
+// clearanceValue accepts the bare spelling a suite writes and the
+// CLEARANCE_ spelling the enum uses. An empty name is UNSPECIFIED, which is
+// how a tool says it requires no particular seniority of an approver.
+func clearanceValue(name string) toolv1.Clearance {
+	if name == "" {
+		return toolv1.Clearance_CLEARANCE_UNSPECIFIED
+	}
+	if !strings.HasPrefix(name, "CLEARANCE_") {
+		name = "CLEARANCE_" + name
+	}
+	return toolv1.Clearance(toolv1.Clearance_value[name])
 }
