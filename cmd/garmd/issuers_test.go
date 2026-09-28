@@ -153,9 +153,15 @@ func TestARepeatedJWKSHasNoUnambiguousGrantDefault(t *testing.T) {
 // --grant-jwks to be ambiguous about.
 func TestTwoIssuersWithoutAGrantIssuerStillStart(t *testing.T) {
 	o := serveOpts{
+		issuers: []string{"https://idp.example.com", "https://sts.example.com"},
 		jwksURLs: []string{"https://idp.example.com/jwks.json",
 			"https://sts.example.com/jwks.json"},
 		audience: "garm",
+	}
+	// The pairing itself must be accepted first, as runServe does, or this
+	// test would pass for a config the daemon refuses one line earlier.
+	if _, err := trustedIssuers(o.issuers, o.jwksURLs); err != nil {
+		t.Fatalf("two paired issuers were refused: %v", err)
 	}
 	if err := checkGrantFlags(o); err != nil {
 		t.Fatalf("a two-issuer deployment with no --grant-issuer was refused: %v", err)
