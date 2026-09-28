@@ -693,3 +693,32 @@ func TestAnObjectTooLargeToReadIsRefusedLoudlyAndNotFetchedAgain(t *testing.T) {
 		t.Errorf("a changed object was not read: %d reads", obj.reads)
 	}
 }
+
+// The restatement throttle keys on the reason, not only on the object: one
+// object whose coverage refusal lifts, only for the chain build to refuse it,
+// is two different facts, and an operator hears both — now, not in an hour.
+func TestAChangedRefusalReasonForTheSameObjectIsLoggedAtOnce(t *testing.T) {
+	f := newFixture(t, catalogueBytes(t, "get_status"))
+	f.poller.Admit = func(*catalogue.Catalogue) error {
+		return fmt.Errorf("the replay cache keeps an entry for 1h and a tool declares " +
+			"grants valid for 2h")
+	}
+	f.obj.put(catalogueBytes(t, "get_balance"), `"v2"`)
+	if got := f.poller.Once(context.Background()); got != reload.Kept {
+		t.Fatalf("outcome = %v, want Kept", got)
+	}
+
+	// Same object, same ETag; the coverage refusal lifts and the chain refuses.
+	f.poller.Admit = nil
+	f.handle.refuse = true
+	if got := f.poller.Once(context.Background()); got != reload.Kept {
+		t.Fatalf("outcome = %v, want Kept", got)
+	}
+	log := f.log.String()
+	if !strings.Contains(log, "not covered by this deployment") {
+		t.Errorf("the first refusal was not logged:\n%s", log)
+	}
+	if !strings.Contains(log, "cannot be governed by this deployment") {
+		t.Errorf("the changed refusal reason was swallowed by the throttle:\n%s", log)
+	}
+}

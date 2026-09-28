@@ -139,6 +139,11 @@ type refusal struct {
 	body     []byte
 	digest   string
 	reported time.Time
+	// reason is the message last stated for this object. A refusal whose
+	// reason CHANGES between polls is news even when the object is not —
+	// the coverage check lifting only for the chain build to refuse is a
+	// different fact from either alone — so the throttle keys on it.
+	reason string
 }
 
 // repeatRefusalEvery is how often an UNCHANGED refusal is restated.
@@ -200,6 +205,10 @@ func (p *Poller) Once(ctx context.Context) Outcome {
 		return Kept
 	}
 	if etag == p.etag {
+		// The bucket now holds what is serving — a bad push was reverted.
+		// Whatever was refused meanwhile is not coming back under this
+		// ETag, so stop holding its bytes.
+		p.forget()
 		return Unchanged
 	}
 
@@ -380,11 +389,12 @@ func (p *Poller) forget() { p.last = refusal{} }
 // report states a refusal, and states an unchanged one rarely. See
 // repeatRefusalEvery.
 func (p *Poller) report(repeat bool, msg string, args ...any) {
-	if repeat && !p.last.reported.IsZero() &&
+	if repeat && msg == p.last.reason && !p.last.reported.IsZero() &&
 		time.Since(p.last.reported) < repeatRefusalEvery {
 		return
 	}
 	p.last.reported = time.Now()
+	p.last.reason = msg
 	p.Log.Error(msg, args...)
 }
 

@@ -14,7 +14,9 @@
   their approval ceilings checked against the replay cache this process
   actually holds, and the chain built for them — and only then does the store
   take them. Any refusal at any of those leaves the previous generation serving
-  and logs at error with the serving digest and the refused one. An unreachable
+  and logs at error naming the serving digest and, whenever the bytes got as far
+  as being read, the refused one (an object past the byte ceiling has no
+  digest to name). An unreachable
   store is a warning and no swap: a bucket that cannot be read is not evidence
   that what is serving is wrong. The ETag only says *look again*; the DIGEST
   decides, so a re-upload of identical bytes is not a new generation. A refused
