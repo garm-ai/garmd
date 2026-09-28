@@ -122,136 +122,11 @@ jobs:
           repository: garm-ai/devkit
           path: devkit
 
-      # spec's default branch, on purpose — pinning this to a feature branch
-      # would ship a workflow that has to be edited again before merge.
-      # conformance/identity/devkit.json currently lives only on spec's
-      # feat/identity-foundations branch, so this job stays red until BOTH
-      # that branch and garmd's feat/identity-foundations land on their
-      # respective default branches. That first red run is expected, not a
-      # regression.
-      #
-      # spec is a private repository, so this job requires a GARM_CI_TOKEN
-      # secret with read access to it. Because garmd is public, PRs from
-      # forks are handed no secrets — which is why the job-level `if` above
-      # skips them outright. Without that guard the secret would resolve
-      # empty, `github.token` would be substituted, and this step would fail
-      # with a permissions error indistinguishable from a real one. Drift is
-      # therefore caught for maintainers and not for outside contributors;
-      # KNOWN-GAPS.md says so.
-      - uses: actions/checkout@v5
-        with:
-          repository: garm-ai/spec
-          path: spec
-          token: ${{ secrets.GARM_CI_TOKEN || github.token }}
-
-      - uses: jdx/mise-action@v2
-        with:
-          install: true
-          cache: true
-          working_directory: garmd
-
-      - name: start the dev IdP
-        working-directory: devkit
-        run: |
-          # Redirected to a file rather than left attached to this step's
-          # log: a backgrounded process that inherits an unredirected
-          # stdout/stderr keeps that pipe's write end open after this script
-          # exits, and the runner reads its log until EOF — which never
-          # arrives, because the IdP runs forever. That hangs the step
-          # itself even though the readiness loop below exits fine.
-          go run ./cmd/garmdev idp \
-            --personas examples/personas.yaml \
-            --audience garm > /tmp/idp.log 2>&1 &
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:7450/.well-known/jwks.json >/dev/null && exit 0
-            sleep 1
-          done
-          echo "the dev IdP never came up" >&2
-          cat /tmp/idp.log >&2
-          exit 1
-
-      - name: conformance
-        working-directory: garmd
-        run: |
-          # go test's working directory is the PACKAGE directory
-          # (garmd/internal/conformance), not the module root, so a relative
-          # ../spec/... would resolve under garmd, not beside it. This path
-          # must stay absolute, via $GITHUB_WORKSPACE, or it will fail on
-          # its first run.
-          go test -tags conformance ./internal/conformance/ -v \
-            -suite "$GITHUB_WORKSPACE/spec/conformance/identity/devkit.json" \
-            -idp http://127.0.0.1:7450
-
-      - name: assert no dependency on a minter
-        working-directory: garmd
-        run: |
-          # BOTH build configurations, because a build tag hides an import
-          # from `go list` completely. conformance_test.go is
-          # //go:build conformance — the single file in this repository most
-          # likely to reach for a minter — and an untagged list does not see
-          # it at all:
-          #
-          #   go list -f '{{.XTestGoFiles}}' ./internal/conformance/
-          #     [run_test.go suite_test.go]
-          #   go list -tags conformance -f '{{.XTestGoFiles}}' ./internal/conformance/
-          #     [conformance_test.go run_test.go suite_test.go]
-          #
-          # The constraint is "not in go.mod, not in a _test.go import, not
-          # behind a build tag", so the check has to be run once per tag set.
-          for tags in "" "conformance"; do
-            # The assignment on its own line is the real protection here: a
-            # `go list` that fails inside an `if` condition is swallowed and
-            # reads as a clean check, where under errexit a failing
-            # assignment aborts the step. The empty-output guard below
-            # covers the remaining case — a `go list` that succeeds but
-            # prints nothing is broken, not clean.
-            deps=$(go list -tags "$tags" -deps -test ./...)
-            if [ -z "$deps" ]; then
-              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
-              exit 1
-            fi
-            if echo "$deps" | grep -qE 'garm-ai/(devkit|sts)'; then
-              echo "::error::garmd has acquired a dependency on a token minter (tags=\"$tags\")" >&2
-              exit 1
-            fi
-          done
-          echo "clean: no minter in the dependency graph, untagged or under -tags conformance"
-
-  conformance-sts:
-    name: identity conformance (sts)
-    runs-on: ubuntu-latest
-    # Same reasoning as the devkit conformance job above: both the `spec`
-    # and `sts` checkouts below need a secret a fork PR is handed none of.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          path: garmd
-
-      # Cloned, never required — see the boundaries job's "no dependency on
-      # a minter" check, which now also greps for garm-ai/sts.
-      - uses: actions/checkout@v5
-        with:
-          repository: garm-ai/devkit
-          path: devkit
-
-      - uses: actions/checkout@v5
-        with:
-          repository: garm-ai/sts
-          path: sts
-          token: ${{ secrets.GARM_CI_TOKEN || github.token }}
-
-      # spec's default branch, on purpose — see the devkit conformance job
-      # above for why. conformance/identity/sts.json currently lives only on
-      # spec's feat/sts-conformance-suite branch, so this job stays red until
-      # that branch (and this one) land on their respective default
-      # branches. That first red run is expected, not a regression.
-      - uses: actions/checkout@v5
-        with:
-          repository: garm-ai/spec
-          path: spec
-          token: ${{ secrets.GARM_CI_TOKEN || github.token }}
-
+      # The suite for this job lives in this repository at
+      # internal/conformance/suites/sts.json, alongside devkit's. Both moved
+      # here from the private `spec` repo: a public repository's CI cannot
+      # reach a private one from a fork, so the drift check only ran for
+      # maintainers. It now runs for everyone.
       - uses: jdx/mise-action@v2
         with:
           install: true
@@ -347,9 +222,10 @@ jobs:
           # Absolute, via $GITHUB_WORKSPACE, for the same reason the devkit
           # conformance job's own -suite path is: go test's working directory
           # is the PACKAGE directory, not the module root, so a relative
-          # ../spec/... would resolve under garmd, not beside it.
+          # Relative to internal/conformance/: `go test` sets the test
+          # binary's cwd to the package directory.
           go test -tags conformance ./internal/conformance/ -v \
-            -suite "$GITHUB_WORKSPACE/spec/conformance/identity/sts.json" \
+            -suite suites/sts.json \
             -idp http://127.0.0.1:8081 \
             -minter form \
             -client-id conformance-client \

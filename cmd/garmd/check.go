@@ -172,7 +172,7 @@ func ephemeralHashKey() []byte {
 // retention they claim.
 type assumedGrants struct{}
 
-func (assumedGrants) Verify(context.Context, *toolplane.Principal, toolplane.ToolDef) error {
+func (assumedGrants) Verify(context.Context, *toolplane.Principal, toolplane.ToolDef, proto.Message) error {
 	return nil
 }
 

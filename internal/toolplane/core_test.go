@@ -287,7 +287,7 @@ func (s *stubFGA) Post(
 // stubGrants is a GrantVerifier that returns whatever the test says.
 type stubGrants struct{ err error }
 
-func (s *stubGrants) Verify(_ context.Context, _ *toolplane.Principal, _ toolplane.ToolDef) error {
+func (s *stubGrants) Verify(_ context.Context, _ *toolplane.Principal, _ toolplane.ToolDef, _ proto.Message) error {
 	return s.err
 }
 

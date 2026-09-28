@@ -2,11 +2,13 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"github.com/garm-ai/garmd/internal/record"
@@ -232,5 +234,73 @@ func TestACatalogueWhoseStepsAreConfiguredPreparesCleanly(t *testing.T) {
 	h := chained(&Handler{Store: &countingStore{c: aCatalogue()}, Invoker: &fakeInvoker{}})
 	if err := h.Prepare(aCatalogue()); err != nil {
 		t.Fatalf("an ordinary catalogue would not prepare: %v", err)
+	}
+}
+
+// A grant-gated tool refused for want of a grant must tell the caller what to
+// go and get. Everything else in the chain answers with a code and a static
+// sentence; this is the one refusal with a next move, and a caller told only
+// "denied" would fetch nothing and retry forever.
+func TestAGrantRequiredRefusalSaysWhatToAskFor(t *testing.T) {
+	cat := aCatalogue()
+	cat.Defs[0].ApprovalMode = toolv1.Approval_MODE_GRANT
+	cat.Defs[0].MaxGrantAge = 15 * time.Minute
+	cat.Defs[0].MaterialFields = []string{"producer"}
+
+	inv := &fakeInvoker{fill: "x"}
+	h := chained(&Handler{
+		Store:   &countingStore{c: cat},
+		Invoker: inv,
+		Grants:  refusingGrants{},
+	})
+
+	w := call(t, h, httptest.NewRequest(http.MethodPost, route, strings.NewReader("")))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if got["code"] != "grant_required" {
+		t.Errorf("code = %v; a caller cannot tell this apart from a denial", got["code"])
+	}
+	if got["tool"] != fqn {
+		t.Errorf("tool = %v, want %q", got["tool"], fqn)
+	}
+	fields, _ := got["material_fields"].([]any)
+	if len(fields) != 1 || fields[0] != "producer" {
+		t.Errorf("material_fields = %v; without them the caller cannot build an "+
+			"approval request and must copy the annotation by hand", got["material_fields"])
+	}
+	if got["max_grant_age_seconds"] != float64(900) {
+		t.Errorf("max_grant_age_seconds = %v, want 900", got["max_grant_age_seconds"])
+	}
+	// And the tool was never reached.
+	if n := inv.calls.Load(); n != 0 {
+		t.Errorf("the tool ran %d times without an approval", n)
+	}
+}
+
+// The header is lifted, not judged. A surface that verified a grant would be a
+// second place approvals are decided.
+func TestAPresentedGrantReachesTheVerifier(t *testing.T) {
+	cat := aCatalogue()
+	cat.Defs[0].ApprovalMode = toolv1.Approval_MODE_GRANT
+
+	seen := &recordingGrants{}
+	h := chained(&Handler{
+		Store:   &countingStore{c: cat},
+		Invoker: &fakeInvoker{fill: "x"},
+		Grants:  seen,
+	})
+
+	r := httptest.NewRequest(http.MethodPost, route, strings.NewReader(""))
+	r.Header.Set(GrantHeader, "the-grant")
+	call(t, h, r)
+
+	if got := seen.token.Load(); got == nil || *got != "the-grant" {
+		t.Errorf("the verifier saw %v; the header never reached step 5", got)
 	}
 }

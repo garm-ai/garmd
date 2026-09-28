@@ -218,6 +218,7 @@ func sameDeclarationAs(t, o ToolDef) bool {
 		t.ApproverMinClearance == o.ApproverMinClearance &&
 		slices.Equal(t.ApproverCompartments, o.ApproverCompartments) &&
 		t.MaxGrantAge == o.MaxGrantAge &&
+		slices.Equal(t.MaterialFields, o.MaterialFields) &&
 		t.AuditLevel == o.AuditLevel &&
 		t.AuditRecordRequest == o.AuditRecordRequest &&
 		t.AuditRecordResponse == o.AuditRecordResponse &&

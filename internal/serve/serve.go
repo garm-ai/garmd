@@ -40,6 +40,7 @@ import (
 	"github.com/garm-ai/garm/contracts/audit"
 	"github.com/garm-ai/garm/contracts/ledger"
 	"github.com/garm-ai/garmd/internal/catalogue"
+	"github.com/garm-ai/garmd/internal/grants"
 	"github.com/garm-ai/garmd/internal/tool"
 	"github.com/garm-ai/garmd/internal/toolplane"
 	"github.com/garm-ai/garmd/internal/transport"
@@ -150,6 +151,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A presented grant travels on the context to step 5, the same way the
+	// bearer token travels to step 1. Lifted, never verified here: a surface
+	// that judged a grant would be a second place approvals are decided.
+	if g := r.Header.Get(GrantHeader); g != "" {
+		r = r.WithContext(grants.WithGrant(r.Context(), g))
+	}
+
 	// Step 1, and it runs BEFORE the route is looked up.
 	//
 	// The order is the point. Answering "no such tool" to an unauthenticated
@@ -236,6 +244,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(out)
 }
 
+// GrantHeader is where a caller presents an approval.
+//
+// A header of its own rather than a second Authorization value: the two are
+// different credentials answering different questions — who you are, and what
+// a human agreed you may do once — and conflating them would make a grant
+// look like a way to authenticate.
+const GrantHeader = "Garm-Grant"
+
+// writeGrantRequired answers a gated call that arrived without one.
+func writeGrantRequired(w http.ResponseWriter, def tool.Def) {
+	w.Header().Set("Content-Type", contentJSON)
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code":                  "grant_required",
+		"message":               "a human grant is required",
+		"tool":                  def.FQN,
+		"material_fields":       def.MaterialFields,
+		"max_grant_age_seconds": int(def.MaxGrantAge.Seconds()),
+	})
+}
+
 // maxRequestBytes is a guard, not a policy. Per-tool limits belong in the
 // chain, where they can differ by tool and by caller; this only stops one
 // request from exhausting the process before anything has looked at it.
@@ -276,6 +305,18 @@ func (h *Handler) writeChainErr(w http.ResponseWriter, def tool.Def, err error) 
 	// fault and is the only failure here that names an operator's problem: the
 	// catalogue declares a tool and nothing is serving it. Reporting it as a
 	// tool failure sends someone to read handler code that is working fine.
+	// The only refusal with a next move: obtain an approval and come back.
+	// Everything the caller needs to ask for one, and nothing it did not
+	// already know — step 2 ran first, so a caller reaching step 5 has
+	// already been shown this tool in their catalogue.
+	//
+	// Field PATHS, never values. The caller sent those values, so echoing
+	// them adds nothing, and an error path that quotes request content is the
+	// habit that leaks somewhere else later.
+	if errors.Is(err, grants.ErrGrantRequired) {
+		writeGrantRequired(w, def)
+		return
+	}
 	if errors.Is(err, transport.ErrUnreachable) {
 		if h.Log != nil {
 			h.Log.Warn("tool is declared but unreachable",

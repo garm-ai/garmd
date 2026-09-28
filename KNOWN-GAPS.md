@@ -172,13 +172,19 @@ What remains unguarded, in four parts:
 **The suite covers the five personas in `devkit.json` and no others**, so a
 claim shape only a different persona would exercise is still unchecked.
 
-**The job cannot run on pull requests from forks.** `garmd` is public and
-`spec` is private, so the private checkout needs a secret and a fork PR is
-handed none. The job carries an `if` that skips it there rather than failing
-the checkout with a permissions error that would read like a bug in the
-contributor's change. Drift is therefore caught for maintainers and not for
-outside contributors: a first-party push or PR is the only place this check
-runs.
+**The suites live in this repository.** `internal/conformance/suites/` holds
+`devkit.json` and `sts.json`. They were in the private `spec` repo, which made
+this a public repository's CI reaching into a private one: it needed a
+`GARM_CI_TOKEN` secret, and a pull request from a fork is handed no secrets at
+all, so the job had to skip there. Drift was caught for maintainers and not for
+outside contributors — the people most likely to change a claim shape without
+knowing what depends on it.
+
+Moving them here costs the arrangement its third party. The verifier now owns
+the expectations it verifies against, so a fold bug and a matching expectation
+edit can land in one commit. That is a real weakening, and it is why these
+files are DATA a reviewer reads rather than code: a changed expectation shows
+up in a diff as a changed fold, which is exactly the thing worth arguing about.
 
 **The `aud` array form — the bug this branch fixes — is never exercised by
 the drift check.** `devkit` mints `aud` as a bare string, so every token the

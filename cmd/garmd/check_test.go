@@ -97,7 +97,7 @@ func TestZeroRetentionMeansNoSinkRatherThanForever(t *testing.T) {
 // are exactly as inert as their names claim, so nobody mistakes one for a
 // partial implementation worth finishing.
 func TestTheAssumedSeamsAreInert(t *testing.T) {
-	if err := (assumedGrants{}).Verify(t.Context(), nil, toolplane.ToolDef{}); err != nil {
+	if err := (assumedGrants{}).Verify(t.Context(), nil, toolplane.ToolDef{}, nil); err != nil {
 		t.Errorf("assumedGrants refused something; it is a stand-in, not a verifier: %v", err)
 	}
 	if got := (assumedAudit{retention: time.Hour}).Retention(); got != time.Hour {

@@ -243,6 +243,7 @@ func defFor(fd protoreflect.FileDescriptor, svc protoreflect.ServiceDescriptor,
 		ApproverCompartments: p.GetApproval().GetApproverCompartments(),
 		MaxGrantAge: time.Duration(p.GetApproval().GetMaxGrantAgeSeconds()) *
 			time.Second,
+		MaterialFields: p.GetApproval().GetMaterialFields(),
 
 		AuditLevel:          p.GetAudit().GetLevel(),
 		AuditRecordRequest:  p.GetAudit().GetRecordRequest(),

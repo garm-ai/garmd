@@ -72,7 +72,13 @@ type Def struct {
 	ApproverMinClearance toolv1.Clearance
 	ApproverCompartments []string
 	MaxGrantAge          time.Duration
-	AuditLevel           toolv1.Audit_Level
+
+	// MaterialFields are the dotted paths whose values a grant binds to —
+	// what the human actually saw. Empty means the grant binds only tool,
+	// subject and time, which for anything irreversible is close to no
+	// binding at all.
+	MaterialFields []string
+	AuditLevel     toolv1.Audit_Level
 
 	// The rest of the audit block, carried because a declaration the runtime
 	// silently drops is worse than no declaration.
