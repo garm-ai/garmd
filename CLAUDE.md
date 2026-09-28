@@ -58,6 +58,12 @@ a service.
 NATS implements both. The second adapter waits for a named trigger — an
 enterprise that cannot run NATS — not for a feeling that abstraction is tidy.
 
+The invocation hop carries `Garm-Invocation` beside the request: the caller's
+assertions, encoded by `contracts/callctx`. Assertions, never credentials —
+the token does not cross this boundary, and neither does clearance or
+compartments, because a tool that can see clearance is a tool that will
+eventually filter.
+
 ## Working here
 
 ```

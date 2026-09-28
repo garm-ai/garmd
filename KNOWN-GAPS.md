@@ -8,7 +8,14 @@
   `--max-tools` is an opt-in budget for catching a deployment pointed at the
   wrong catalogue.
 - `internal/transport` — the Invoker and Discoverer ports, with a NATS
-  adapter. Invocation, and discovery over `$SRV.INFO`.
+  adapter. Invocation, and discovery over `$SRV.INFO`. **Every hop carries
+  `Garm-Invocation`**: the caller's assertions — tenant and correlation id,
+  the subject and its kind, the delegation chain in `act`, the absolute
+  deadline, and the ledger row's id as `call_id` — encoded by
+  `contracts/callctx`. Assertions only: never the caller's token, and never
+  clearance or compartments, which are garm's to decide with and not a tool's
+  to see. A tool runtime that refuses a request without the header is now
+  reachable from here.
 - `internal/tool` — `Def`, the in-memory declaration.
 - `internal/serve` — the agent-facing surface. Dynamic dispatch: a request is
   unmarshalled into a message built from a catalogue descriptor, routed over

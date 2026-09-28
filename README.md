@@ -51,6 +51,13 @@ large or one that would not unmarshal — produce no row and so carry no id.
 A successful answer also carries `Garm-Catalogue-Digest`, naming the catalogue
 that served it. Refusals do not carry it today.
 
+Going the other way, the NATS hop carries `Garm-Invocation`: what the caller
+asserts — subject and kind, the delegation chain, tenant, correlation id, the
+absolute deadline, and the same ledger row id as `call_id` — so a tool learns
+who is calling it and a delegated call does not arrive looking direct. It
+carries assertions and never credentials: the caller's token does not cross
+this boundary in any form, and neither does clearance or compartments.
+
 Not every step of the chain is implemented. `KNOWN-GAPS.md` is the list, and it
 is kept honest rather than aspirational.
 

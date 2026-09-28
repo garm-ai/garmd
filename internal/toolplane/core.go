@@ -611,7 +611,7 @@ func (c *Core) invoke(
 		return nil, fmt.Errorf("%w: the audit record could not be written", errUnavailable)
 	}
 
-	ctx = c.withInvocationContext(ctx, p)
+	ctx = c.withInvocationContext(ctx, p, ev.ID)
 
 	resp, err = c.resolve(ctx, procedure, req, fn)
 	if err != nil {
@@ -898,28 +898,34 @@ func (c *Core) checkAvailability(t ToolDef, ev *ledger.Event) error {
 // any form — see transport/nats.Transport.Invoke's own comment on headers carrying
 // assertions, never credentials).
 //
-// causation_id is also left unset — empty because this build has no front
-// door that threads in the immediate parent call's own id (the LLM
-// generation that decided to call this tool, in design spec §4.2's
-// diagram), not because it was forgotten. Core.Invoke's own signature has
-// nothing to carry it from today; setting it requires a decision about
-// THAT signature, which is not this function's to make.
+// causation_id is left unset — empty because this build has no front door
+// that threads in the immediate parent call's own id (the LLM generation
+// that decided to call this tool, in design spec §4.2's diagram), not
+// because it was forgotten. Core.Invoke's own signature has nothing to
+// carry it from today.
 //
-// call_id, the deadline and trace context are deliberately NOT set here:
-// those are per-HOP, minted by whichever resolver actually crosses the
-// wire (the transport mints its own), not per-INVOKE. A resolver that
-// finds an InvocationContext already on ctx must fill those in itself
-// rather than trust ones set this far upstream, or two resolvers reusing
-// one ctx.Value(...) instance across retries would collide on one call_id.
-func (c *Core) withInvocationContext(ctx context.Context, p *Principal) context.Context {
+// call_id IS set here, to the ledger event id of this call, and it is the
+// one identifier that must be the same on both sides: a caller joining its
+// step record to the ledger row has only this. A resolver minting its own
+// per-hop id instead would produce a call_id that appears in no ledger row.
+// A resolver that crosses the wire fills in what is genuinely per-HOP — the
+// deadline it is actually enforcing, trace context — over the top of what it
+// finds, on a CLONE, because this value is shared with every hop.
+//
+// act carries the delegation chain minus the subject, so a tool — or a runner
+// performing a token exchange on the caller's behalf — sees that the call was
+// delegated and by whom. Omitting it would make a delegated call look direct
+// to everything on the far side of the hop, and an exchange performed on that
+// reading would mint for the subject alone: a widening, arrived at by
+// silence.
+func (c *Core) withInvocationContext(
+	ctx context.Context, p *Principal, callID string,
+) context.Context {
 	// Prefer a correlation_id already on ctx: nothing upstream sets one
 	// today, so this is inert in this build, but the day a front door
 	// decodes an inbound callctx.Header (a delegated call, say) and puts it
 	// on ctx before calling Invoke, overwriting it here would silently
-	// sever that caller's own trace — the same reasoning
-	// the transport already applies to the rest of the message when it
-	// clones an existing InvocationContext instead of building from
-	// nothing.
+	// sever that caller's own trace.
 	correlationID := newCorrelationID()
 	if existing := callctx.FromContext(ctx).GetAttribution().GetCorrelationId(); existing != "" {
 		correlationID = existing
@@ -933,6 +939,17 @@ func (c *Core) withInvocationContext(ctx context.Context, p *Principal) context.
 			Subject: p.Subject,
 			Kind:    p.Kind,
 		},
+		CallId: callID,
+	}
+	// Chain is [subject, actor, actor, …] — the fold's own order — so act is
+	// everything after the subject. Kind is not carried per hop: Principal
+	// holds one, for the subject, and inventing a kind for an actor would be
+	// an assertion nothing verified.
+	if len(p.Chain) > 1 {
+		ic.Act = make([]*toolv1.Act, 0, len(p.Chain)-1)
+		for _, subject := range p.Chain[1:] {
+			ic.Act = append(ic.Act, &toolv1.Act{Subject: subject})
+		}
 	}
 	return callctx.NewContext(ctx, ic)
 }

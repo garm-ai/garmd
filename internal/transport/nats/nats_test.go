@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/garm-ai/garm/contracts/callctx"
+	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
 	"github.com/garm-ai/garm/contracts/wire"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -418,4 +420,149 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// What crosses the hop beside the request.
+//
+// A fake service decodes the header the way tool-go does, so this asserts the
+// bytes on the wire rather than this package's opinion of them. Assertions,
+// never credentials: the caller's token does not appear here in any form.
+func TestTheInvocationContextCrossesTheHopOnItsHeader(t *testing.T) {
+	nc := connect(t)
+
+	// Built before subscribing: the reply function runs on nats.go's own
+	// goroutine, where a t.Fatalf would be a test-framework misuse rather
+	// than a failure anybody can read.
+	reply := marshalled(t, wrapperspb.String("pong"))
+	got := make(chan *toolv1.InvocationContext, 1)
+	bad := make(chan error, 1)
+	serveTool(t, nc, func(m *nats.Msg) *nats.Msg {
+		ic, err := callctx.Decode(m.Header.Get(callctx.Header))
+		if err != nil {
+			bad <- err
+		} else {
+			got <- ic
+		}
+		return &nats.Msg{Data: reply}
+	})
+
+	deadline := time.Now().Add(9 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	ctx = callctx.NewContext(ctx, &toolv1.InvocationContext{
+		CallId: "ev-1",
+		Attribution: &toolv1.CallContext{
+			Tenant:        "acme",
+			CorrelationId: "corr-1",
+		},
+		Principal: &toolv1.InvocationPrincipal{
+			Subject: "employee:jdoe",
+			Kind:    toolv1.PrincipalKind_PRINCIPAL_KIND_USER,
+		},
+		Act: []*toolv1.Act{{
+			Subject: "agent:support-assistant",
+			Kind:    toolv1.PrincipalKind_PRINCIPAL_KIND_AGENT,
+		}},
+	})
+
+	var out wrapperspb.StringValue
+	if err := natstransport.New(nc).Invoke(ctx, procedure, wrapperspb.String("ping"), &out); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+
+	select {
+	case err := <-bad:
+		t.Fatalf("the service could not decode the header: %v", err)
+	case ic := <-got:
+		if ic.GetCallId() != "ev-1" {
+			t.Errorf("call_id = %q, want ev-1: the ledger row and the hop must "+
+				"carry the same id or they cannot be joined", ic.GetCallId())
+		}
+		if ic.GetPrincipal().GetSubject() != "employee:jdoe" {
+			t.Errorf("subject = %q, want employee:jdoe", ic.GetPrincipal().GetSubject())
+		}
+		if ic.GetPrincipal().GetKind() != toolv1.PrincipalKind_PRINCIPAL_KIND_USER {
+			t.Errorf("kind = %v, want USER", ic.GetPrincipal().GetKind())
+		}
+		if len(ic.GetAct()) != 1 || ic.GetAct()[0].GetSubject() != "agent:support-assistant" {
+			t.Errorf("act = %v; a delegated call reached the service looking direct, "+
+				"and whatever exchanges on it would mint for the wrong chain", ic.GetAct())
+		}
+		if ic.GetAttribution().GetTenant() != "acme" {
+			t.Errorf("tenant = %q, want acme", ic.GetAttribution().GetTenant())
+		}
+		if d := ic.GetDeadline(); d == nil {
+			t.Error("no deadline on the hop; a relative one would restart here and a " +
+				"chain of hops would outlive what the caller allowed")
+		} else if diff := d.AsTime().Sub(deadline); diff > time.Second || diff < -time.Second {
+			t.Errorf("deadline = %s, want %s", d.AsTime(), deadline)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the service was called but reported no header")
+	}
+}
+
+// A caller with no context on ctx is an in-process one — a test, a direct
+// probe — and the header still has to be well formed, because the other side
+// refuses a request without one. A minted call_id is honest about what it is:
+// this hop's identifier, and no claim about a principal.
+func TestAHopWithNoUpstreamContextStillCarriesAUsableHeader(t *testing.T) {
+	nc := connect(t)
+
+	reply := marshalled(t, wrapperspb.String("pong"))
+	got := make(chan string, 1)
+	serveTool(t, nc, func(m *nats.Msg) *nats.Msg {
+		got <- m.Header.Get(callctx.Header)
+		return &nats.Msg{Data: reply}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out wrapperspb.StringValue
+	if err := natstransport.New(nc).Invoke(ctx, procedure, wrapperspb.String("ping"), &out); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+
+	raw := <-got
+	if raw == "" {
+		t.Fatal("no Garm-Invocation header; the far side refuses a request without one")
+	}
+	ic, err := callctx.Decode(raw)
+	if err != nil {
+		t.Fatalf("the header does not decode: %v", err)
+	}
+	if ic.GetCallId() == "" {
+		t.Error("call_id is empty, which callctx.Decode refuses by design")
+	}
+	if ic.GetPrincipal().GetSubject() != "" {
+		t.Errorf("subject = %q was invented for a call that asserted nobody",
+			ic.GetPrincipal().GetSubject())
+	}
+}
+
+// The context on ctx is shared with every hop this call makes. Mutating it
+// would let two resolvers collide on one call_id, so each hop clones.
+func TestTheHopDoesNotMutateTheContextItWasGiven(t *testing.T) {
+	nc := connect(t)
+
+	reply := marshalled(t, wrapperspb.String("pong"))
+	serveTool(t, nc, func(*nats.Msg) *nats.Msg { return &nats.Msg{Data: reply} })
+
+	upstream := &toolv1.InvocationContext{
+		CallId:    "ev-1",
+		Principal: &toolv1.InvocationPrincipal{Subject: "employee:jdoe"},
+	}
+	ctx, cancel := context.WithTimeout(callctx.NewContext(context.Background(), upstream),
+		5*time.Second)
+	defer cancel()
+
+	var out wrapperspb.StringValue
+	if err := natstransport.New(nc).Invoke(ctx, procedure, wrapperspb.String("ping"), &out); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+
+	if upstream.GetDeadline() != nil {
+		t.Error("the hop wrote its own deadline into the context the chain owns")
+	}
 }
