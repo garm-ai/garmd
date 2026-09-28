@@ -97,6 +97,12 @@ func Fold(c *Claims, reg *policy.Registry) (*toolplane.Principal, []string, erro
 		// not scope themselves must not silently scope an agent to nothing.
 		ToolSets: toolSets,
 	}
+	// From the OUTERMOST claims only, and not folded. There is nothing to
+	// intersect: a runner asserts no authority, and an `exec` on a nested act
+	// entry would be a runner claiming to have executed a hop it did not.
+	if c.Exec != nil {
+		p.Execution = c.Exec.Subject
+	}
 	// Actor is the INNERMOST actor — the party actually making the call.
 	// Empty for a direct token, which is how the ledger tells a human
 	// calling directly from an agent calling on their behalf.

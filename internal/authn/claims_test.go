@@ -1,8 +1,10 @@
 package authn_test
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/garm-ai/garm/policy"
 	"github.com/garm-ai/garmd/internal/authn"
 )
 
@@ -190,5 +192,156 @@ func TestAnUnknownKindIsDroppedNotFatal(t *testing.T) {
 	}
 	if c.Garm.Kind != "" {
 		t.Errorf("Kind = %q, want empty for a kind this build does not know", c.Garm.Kind)
+	}
+}
+
+// `exec` names the RUNNER that executed a call, outside the act chain.
+//
+// Outside, and that is the whole shape. A runner is not acting AS anyone — it
+// is the process that executed a workflow on behalf of a chain that already
+// says who authorised what — so folding it into `act` would intersect its
+// authority into the caller's and make the depth ceiling count a party that
+// grants nothing. It is attribution: "which of these rows came from agentd" is
+// a question a ledger is asked constantly and cannot otherwise answer.
+func TestATopLevelExecClaimIsParsed(t *testing.T) {
+	c, err := authn.ParseClaims(map[string]any{
+		"iss":  "https://sts.test",
+		"sub":  "employee:jdoe",
+		"aud":  "garm",
+		"garm": map[string]any{"clearance": "CLEARANCE_INTERNAL"},
+		"exec": map[string]any{
+			"sub": "runner:agentd",
+			"iss": "https://sts.test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ParseClaims: %v", err)
+	}
+	if c.Exec == nil {
+		t.Fatal("the exec claim was dropped")
+	}
+	if c.Exec.Subject != "runner:agentd" {
+		t.Errorf("exec.sub = %q, want runner:agentd", c.Exec.Subject)
+	}
+	if c.Exec.Issuer != "https://sts.test" {
+		t.Errorf("exec.iss = %q", c.Exec.Issuer)
+	}
+	// It is not a hop. The depth ceiling counts parties that grant authority,
+	// and a runner grants none.
+	if c.Depth() != 1 {
+		t.Errorf("Depth() = %d, want 1: exec was counted as a delegation hop", c.Depth())
+	}
+}
+
+// A malformed exec is REFUSED rather than ignored.
+//
+// Ignoring it would be the tempting reading — it is attribution, so what harm
+// — and it is wrong: a token whose exec is a bare string is a token something
+// minted incorrectly, and accepting it silently produces ledger rows that say
+// the call was direct when it was not. The one claim in this system whose
+// whole job is to say who ran something must not be allowed to say nothing.
+func TestAMalformedExecClaimIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		exec any
+	}{
+		{"a bare string", "runner:agentd"},
+		{"an empty object", map[string]any{}},
+		{"no sub", map[string]any{"iss": "https://sts.test"}},
+		{"an empty sub", map[string]any{"sub": ""}},
+		{"a sub that is not a string", map[string]any{"sub": 5}},
+		{"a list", []any{"runner:agentd"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := authn.ParseClaims(map[string]any{
+				"iss":  "https://sts.test",
+				"sub":  "employee:jdoe",
+				"aud":  "garm",
+				"garm": map[string]any{"clearance": "CLEARANCE_INTERNAL"},
+				"exec": c.exec,
+			})
+			if err == nil {
+				t.Fatal("a malformed exec claim was accepted; the ledger would record " +
+					"this call as direct")
+			}
+			if !strings.Contains(err.Error(), "exec") {
+				t.Errorf("the error does not name the claim at fault: %v", err)
+			}
+		})
+	}
+}
+
+// Absent is the ordinary case — every token minted today — and must stay
+// unremarkable. A claim that is additive has to be additive in both
+// directions.
+func TestATokenWithNoExecIsUnchanged(t *testing.T) {
+	c, err := authn.ParseClaims(map[string]any{
+		"iss":  "https://sts.test",
+		"sub":  "employee:jdoe",
+		"aud":  "garm",
+		"garm": map[string]any{"clearance": "CLEARANCE_INTERNAL"},
+	})
+	if err != nil {
+		t.Fatalf("ParseClaims: %v", err)
+	}
+	if c.Exec != nil {
+		t.Errorf("an exec claim was invented: %+v", c.Exec)
+	}
+}
+
+// Fold copies it to the Principal and changes nothing else. Nothing in the
+// chain reads it — the ten steps decide on clearance, compartments, verbs and
+// tool sets, and a fifth vocabulary that could deny a call would mean two
+// places to look when one is refused.
+func TestFoldCarriesTheExecutionSubjectAndNarrowsNothing(t *testing.T) {
+	reg, err := policy.NewRegistry(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := map[string]any{
+		"iss":  "https://sts.test",
+		"sub":  "employee:jdoe",
+		"aud":  "garm",
+		"garm": map[string]any{"clearance": "CLEARANCE_RESTRICTED", "verbs": []any{"READ"}},
+		"act": map[string]any{
+			"sub":  "agent:support-assistant",
+			"garm": map[string]any{"clearance": "CLEARANCE_RESTRICTED", "verbs": []any{"READ"}},
+		},
+		"exec": map[string]any{"sub": "runner:agentd", "iss": "https://sts.test"},
+	}
+	c, err := authn.ParseClaims(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	withExec, _, err := authn.Fold(c, reg)
+	if err != nil {
+		t.Fatalf("Fold: %v", err)
+	}
+	if withExec.Execution != "runner:agentd" {
+		t.Errorf("Execution = %q, want runner:agentd", withExec.Execution)
+	}
+
+	delete(raw, "exec")
+	bare, err := authn.ParseClaims(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	without, _, err := authn.Fold(bare, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if without.Execution != "" {
+		t.Errorf("Execution = %q for a token with no exec", without.Execution)
+	}
+	// Everything the chain actually decides on is identical.
+	if withExec.Clearance != without.Clearance ||
+		withExec.Compartments != without.Compartments ||
+		withExec.Verbs != without.Verbs ||
+		withExec.Subject != without.Subject ||
+		withExec.Actor != without.Actor ||
+		len(withExec.Chain) != len(without.Chain) {
+		t.Error("the exec claim changed the authority the fold produced; it is " +
+			"attribution and must narrow and widen nothing")
 	}
 }

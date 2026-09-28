@@ -55,6 +55,21 @@ paired by position, one key set per issuer. A deployment serving an agent
 verifies the human's token from its IdP and the runner's from the STS in one
 process, and a single key set for both would let either sign for the other.
 
+A token may also carry a top-level `"exec": {"sub": "runner:agentd", "iss": …}`
+— the runner that executed the call, beside the `act` chain rather than in it.
+`internal/authn` parses it, the fold copies `exec.sub` onto
+`Principal.Execution`, and that is the end of what happens to it inside the
+chain: **nothing in the ten steps reads it.** It is attribution, like the
+principal's kind — a fifth vocabulary that could deny a call would mean two
+places to look when one is refused.
+
+It is not a delegation hop, so it does not count against the four-deep chain
+ceiling, and garmd checks nothing at all about `exec.iss`: it names whoever
+minted the runner's identity, not an issuer this process has to trust. What
+garmd does insist on is that a present `exec` is well formed — an object with a
+non-empty `sub`. A malformed one refuses the token instead of being dropped,
+because the alternative is a record that says a call was direct when it was not.
+
 ## What is deliberately not here
 
 - **The annotations and the generator** — [`garm`](https://github.com/garm-ai/garm).

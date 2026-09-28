@@ -34,6 +34,17 @@ type GarmClaims struct {
 	Kind string
 }
 
+// ExecClaim is the top-level `exec` claim: the runner that EXECUTED this call.
+//
+// Outside the `act` chain, deliberately and by the STS design's own reservation
+// (sts §4.1). A runner is not acting as anybody — the chain already says who
+// authorised what — so folding it in would intersect an authority it does not
+// have and make the delegation ceiling count a party that grants nothing.
+type ExecClaim struct {
+	Subject string // `sub`, e.g. "runner:agentd"
+	Issuer  string // `iss` of whoever asserted it
+}
+
 // Claims is one identity in a delegation chain. Act is the RFC 8693 `act`
 // claim — the party acting on this subject's behalf — and nests to whatever
 // depth the issuer minted.
@@ -49,6 +60,13 @@ type Claims struct {
 	ExpiresAt, IssuedAt time.Time
 	Garm                GarmClaims
 	Act                 *Claims
+
+	// Exec is attribution and nothing else. Nothing in the chain reads it:
+	// "which of these rows came from a runner" is a question a ledger is asked
+	// constantly and could not answer, and it is not a question the chain
+	// should be able to ask — a fifth vocabulary that could deny a call means
+	// two places to look when one is refused.
+	Exec *ExecClaim
 }
 
 // Depth counts the subject plus every actor in the chain.
@@ -105,6 +123,27 @@ func parseClaims(raw map[string]any, depth int) (*Claims, error) {
 		Verbs:        strSlice(garmRaw, "verbs"),
 		ToolSets:     strSlice(garmRaw, "tool_sets"),
 		Kind:         normaliseKind(str(garmRaw, "kind")),
+	}
+
+	// Refused rather than ignored when malformed. The tempting reading is that
+	// attribution cannot hurt, so a bad one should be dropped — but a token
+	// whose exec is a bare string was minted incorrectly, and accepting it
+	// silently produces ledger rows saying a call was direct when it was not.
+	// The one claim whose whole job is to say who ran something must not be
+	// allowed to say nothing.
+	if ex, present := raw["exec"]; present {
+		obj, ok := ex.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("token for %q carries an `exec` claim that is not an "+
+				"object; it names the runner that executed the call and must be "+
+				"{\"sub\": …, \"iss\": …}", c.Subject)
+		}
+		sub := str(obj, "sub")
+		if sub == "" {
+			return nil, fmt.Errorf("token for %q carries an `exec` claim with no `sub`; "+
+				"an execution claim that names nobody records nothing", c.Subject)
+		}
+		c.Exec = &ExecClaim{Subject: sub, Issuer: str(obj, "iss")}
 	}
 
 	if actRaw, ok := raw["act"].(map[string]any); ok {

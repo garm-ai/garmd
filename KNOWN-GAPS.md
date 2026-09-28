@@ -85,6 +85,26 @@ small catalogue against a bucket holding a large bad one carries both.
   name. The governed door needs it: a human's token comes from an IdP and the
   runner's from the STS, in one process. Audience allowlist, and delegation
   folding that can only narrow.
+- **The `exec` claim, additively.** A token may carry a top-level
+  `"exec": {"sub": "runner:<id>", "iss": …}` outside the `act` chain; the fold
+  copies `exec.sub` to `Principal.Execution` and nothing in the chain reads it.
+  A malformed one — a bare string, an object with no `sub` — refuses the token
+  rather than being dropped, because a claim whose job is to say who ran
+  something must not be allowed to say nothing.
+
+  It is attribution and only attribution. `exec` is not a delegation hop and is
+  not counted by `Claims.Depth`, so a runner cannot spend a level of the
+  four-deep ceiling; it is read from the OUTERMOST claims only, never folded,
+  because a runner asserts no authority there is anything to intersect. And
+  garmd checks nothing whatsoever about `exec.iss`: it names whoever minted the
+  runner's identity, not an issuer this process trusts, and requiring it to be
+  one would make a token unusable for a reason that has no bearing on what the
+  call may do.
+
+  `agentd/internal/authn` parses the same claim the same way —
+  `claims.go:162-172` for the shape and the refusal, `claims.go:69-70` for it
+  not being a hop, `principal.go:206-208` for the copy onto the principal — so
+  the two processes agree on what a token means.
 - **A request folds its token against the generation it is being served by.**
   The surface reads the plane once and pins that chain's compartment registry
   on the request (`authn.WithRegistry`), and step 1 folds against it. A

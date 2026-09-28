@@ -60,6 +60,20 @@ type Principal struct {
 	Verbs        VerbSet
 	TokenID      string
 
+	// Execution is `exec.sub`: the runner that executed this call, outside the
+	// delegation chain.
+	//
+	// Attribution, never authorization — the same stance as Kind, for the same
+	// reason. The ten steps decide on clearance, compartments, verbs and tool
+	// sets; a fifth input that could deny a call would mean two places to look
+	// when one is refused. It exists because a governed call arriving through
+	// a runner is indistinguishable in the ledger from one that did not, and
+	// "which of these were executed by agentd" is the first question anyone
+	// asks of an agent deployment.
+	//
+	// Empty for every direct call, which is every call minted today.
+	Execution string
+
 	// ToolSets scopes this session. NIL means unscoped — the full catalogue
 	// this principal is entitled to — and a non-nil slice means only tools
 	// declaring membership of one of these sets.
