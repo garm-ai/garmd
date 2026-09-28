@@ -77,11 +77,12 @@ approver seniority, and the material digest over the values the human actually
 saw — and `internal/replay` makes it single-use through the `GARM_GRANTS_SPENT`
 JetStream bucket, atomically and across replicas. `garmd serve --grant-issuer`
 builds both, sizes the bucket by the longest `max_grant_age_seconds` the
-catalogue declares, checks that against the retention the bucket actually has,
-and refuses to start if the cache would forget a grant while it is still valid.
-The clock tolerance is `authn.DefaultSkew`, the same 60 seconds the token path
-allows, so a token that verifies and an approval that does not cannot be the
-same clock. Without the flag there is no verifier and a MODE_GRANT catalogue
+catalogue declares plus the clock tolerance, checks that against the retention
+the bucket actually has, and refuses to start if the cache would forget a grant
+while it is still valid. The clock tolerance is `authn.DefaultSkew`, the same
+60 seconds the token path allows, so a token that verifies and an approval that
+does not cannot be the same clock; it is added to the bucket's lifetime because
+the verifier accepts an approval that much past its ceiling. Without the flag there is no verifier and a MODE_GRANT catalogue
 does not mount.
 
 **A MODE_GRANT tool with no `max_grant_age_seconds` will not start.** Without a

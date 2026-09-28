@@ -58,8 +58,18 @@ func grantVerifier(
 			"to hold the %s replay cache", replay.BucketName)
 	}
 
+	// The bucket must outlast the oldest approval the verifier will still
+	// accept, and the verifier accepts an approval up to Skew past its
+	// ceiling (claims.go). Without the margin a grant spent promptly has its
+	// spent-record expire at `longest` while the grant itself stays
+	// acceptable until `longest + Skew` — a replay window exactly one skew
+	// wide, at the tail of every ceiling.
 	longest := longestGrantAge(cat)
-	ttl := longest
+	var covers time.Duration
+	if longest > 0 {
+		covers = longest + authn.DefaultSkew
+	}
+	ttl := covers
 	if ttl <= 0 {
 		ttl = bucketFloorTTL
 	}
@@ -73,7 +83,7 @@ func grantVerifier(
 	// trusting the request. A cache that forgets before a grant expires is
 	// replayable in the gap, and nothing about that is visible at the moment
 	// it is configured.
-	if err := replay.CheckRetention(spent, longest); err != nil {
+	if err := replay.CheckRetention(spent, covers); err != nil {
 		return nil, fmt.Errorf("this deployment cannot verify grants: %w", err)
 	}
 

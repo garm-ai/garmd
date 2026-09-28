@@ -223,9 +223,14 @@ func TestTheBucketIsSizedByTheLongestCeiling(t *testing.T) {
 	if !ok {
 		t.Fatalf("grantVerifier built a %T", v)
 	}
-	if got := ver.Spent.Retention(); got != 2*time.Hour {
-		t.Errorf("the replay cache keeps entries for %s; the catalogue's longest "+
-			"approval is 2h and a shorter cache is replayable in the gap", got)
+	// Ceiling plus the clock tolerance: the verifier accepts an approval up
+	// to Skew past its ceiling, so a cache sized to the ceiling alone forgets
+	// a promptly spent grant one skew before the grant stops verifying.
+	want := 2*time.Hour + authn.DefaultSkew
+	if got := ver.Spent.Retention(); got != want {
+		t.Errorf("the replay cache keeps entries for %s, want %s; the catalogue's "+
+			"longest approval is 2h and the verifier tolerates %s of skew past it, "+
+			"so a shorter cache is replayable in the gap", got, want, authn.DefaultSkew)
 	}
 }
 
