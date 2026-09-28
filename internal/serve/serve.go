@@ -39,6 +39,7 @@ import (
 
 	"github.com/garm-ai/garm/contracts/audit"
 	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/grants"
 	"github.com/garm-ai/garmd/internal/tool"
@@ -150,6 +151,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"this catalogue cannot be served")
 		return
 	}
+
+	// The taxonomy step 1 folds this token's compartment names against, and
+	// it is THIS generation's rather than whatever the verifier happens to
+	// hold.
+	//
+	// A compartment set is a bitset numbered over a whole generation's
+	// declarations, so a principal folded under one generation and judged
+	// under another does not hold a narrower authority or a wider one — it
+	// holds a DIFFERENT one, and the tool it walks through is whichever tool
+	// the bits happen to name here. The verifier's own source swaps on the
+	// reload's clock and this plane swaps on the request's; pinning the
+	// plane's registry is what makes the two the same generation for the
+	// length of one call.
+	r = r.WithContext(authn.WithRegistry(r.Context(), pl.reg))
 
 	// Where the chain will write the id of the row this call produces. It has
 	// to be established before step 1, because step 1's own refusal is

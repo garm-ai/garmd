@@ -41,14 +41,22 @@
   the previous verdict standing.
 - `internal/authn` — step 1. JWT over a cached JWKS, issuer and audience
   allowlists, and delegation folding that can only narrow.
-- **The compartment taxonomy follows the catalogue.** `authn.Swappable` holds
-  it behind an atomic pointer; a reload that loads, mounts and prepares swaps it
-  in, and the next token verified resolves against the new generation's
-  declarations. A name no generation declares is still dropped rather than
-  refused, because an IdP-side typo must cost that caller that compartment and
-  not the whole token. The holder is in place and read on every verification;
-  nothing calls `Set` yet — wiring the reload to it is a later task, so today
-  it serves the boot generation for the life of the process.
+- **A request folds its token against the generation it is being served by.**
+  The surface reads the plane once and pins that chain's compartment registry
+  on the request (`authn.WithRegistry`), and step 1 folds against it. A
+  compartment set is a bitset numbered by sorted index over a whole
+  generation's declarations, so a principal folded under one generation and
+  judged under another holds neither more authority nor less — it holds a
+  DIFFERENT set, and walks through whichever tool those bits happen to name
+  there. A name no generation declares is still dropped rather than refused,
+  because an IdP-side typo must cost that caller that compartment and not the
+  whole token.
+
+  `authn.Swappable` also holds a taxonomy behind an atomic pointer, for a
+  verifier with no plane behind it, and the daemon passes one. Nothing calls
+  `Set` yet — wiring a successful reload to it is a later task, so today it
+  serves the boot generation for the life of the process, and a Config naming
+  both a registry and a source is refused rather than resolved.
 - `internal/record` — where an event goes. Its SHAPE is in the contract,
   because a tool call and a generation call must produce one record type.
 - `internal/record/jetstream` — the ledger, batched onto `GARM_LEDGER`.
@@ -105,10 +113,11 @@ The refusal names the tool.
 reload (Task 10) that lengthens a ceiling, or that introduces the first gated
 tool into a process started without one, does not re-derive or re-check it: the
 bucket keeps the expiry it was created with until a restart, and a grant longer
-than that expiry is replayable in the gap. The verifier's compartment taxonomy
-had the same shape and no longer does — `authn.Swappable`, in the "Built" list
-above — so this bucket is now the one place a boot-derived value is not
-revisited.
+than that expiry is replayable in the gap. The same shape as the verifier's
+compartment taxonomy, which is boot-derived too until Task 10 calls
+`authn.Swappable.Set` — with the difference that a request already folds
+against the generation SERVING it rather than against that boot value, and
+nothing equivalent rescues this bucket.
 
 A presented approval that is not good for this call — wrong tool, wrong
 subject, too old, already spent, material that differs from what was approved —

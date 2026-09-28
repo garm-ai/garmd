@@ -321,14 +321,17 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// availability — the surface logs the drop, because dropping authority
 	// silently is how a typo becomes an unexplained denial nobody can trace.
 	//
-	// Rebuilt on every successful reload, because the taxonomy is a property
-	// of the artifact and the artifact changes.
+	// Built from the boot catalogue and held behind a swappable pointer, so
+	// the taxonomy CAN be replaced without a restart. Nothing calls Set yet:
+	// wiring a successful reload to it is a later task, and until then this
+	// serves the boot generation for the life of the process.
 	//
-	// Built from the boot catalogue and held behind a swappable pointer, so a
-	// reload that declares a new compartment reaches the verifier on the next
-	// token rather than on the next restart. Nothing calls Set yet — the
-	// reload path that will is a later task; until then this serves the boot
-	// generation and the swap is only latent.
+	// What already follows the catalogue is the taxonomy each REQUEST folds
+	// against: the surface pins the current plane's registry on the request
+	// (authn.WithRegistry), which outranks this one. That is not tidiness —
+	// a compartment set is a bitset numbered over a whole generation, so a
+	// fold and the chain that judges it must be on the same generation or the
+	// caller holds compartments nobody granted.
 	reg, err := policy.NewRegistry(cat.Compartments)
 	if err != nil {
 		return fmt.Errorf("the catalogue's compartment declarations: %w", err)

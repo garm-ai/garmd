@@ -3,6 +3,7 @@ package authn_test
 import (
 	"context"
 	"crypto/ecdsa"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -141,14 +142,22 @@ func TestAVerifierWithNoTaxonomyAtAllRefuses(t *testing.T) {
 
 // The reload happens WHILE calls are in flight; that is the whole point of not
 // restarting. Under -race this pins that publishing a generation and folding
-// against one are not a data race, and that every fold sees some whole
-// generation rather than a half-installed one: both registries here declare
-// "financial", so a verification that observed neither would drop it.
+// against one are not a data race — and the assertion is BEHAVIOURAL, because
+// the race detector only sees the word and not the answer.
+//
+// The two generations put the asserted names on different bits: in genA
+// financial=0 and pii-contact=1; in genB billing=0 and financial=1, with
+// pii-contact undeclared. So a fold that read one whole generation returns
+// either no drops (genA) or exactly [pii-contact] (genB), and anything else —
+// a drop of financial, both names dropped, a name neither generation could
+// have produced — is a fold that saw a generation nobody published.
 func TestSwappingWhileVerifyingIsRaceFree(t *testing.T) {
 	now := time.Now()
-	src := authn.NewSwappable(registryOf(t, "financial"))
+	genA := registryOf(t, "financial", "pii-contact")
+	genB := registryOf(t, "billing", "financial")
+	src := authn.NewSwappable(genA)
 	v, key := swappableHarness(t, src)
-	token := sign(t, key, "k1", asserting(now, "financial"))
+	token := sign(t, key, "k1", asserting(now, "financial", "pii-contact"))
 
 	// One verification first, so the key set is cached and the readers below
 	// contend on the registry rather than on the JWKS fetch.
@@ -156,12 +165,7 @@ func TestSwappingWhileVerifyingIsRaceFree(t *testing.T) {
 		t.Fatalf("Verify: %v", err)
 	}
 
-	// Both generations are built on this goroutine: registryOf calls
-	// t.Fatalf, which may only be called from the goroutine running the test.
-	gens := []*policy.Registry{
-		registryOf(t, "financial", "pii-contact"),
-		registryOf(t, "financial", "support"),
-	}
+	gens := []*policy.Registry{genA, genB}
 
 	var writer, readers sync.WaitGroup
 	stop := make(chan struct{})
@@ -183,13 +187,32 @@ func TestSwappingWhileVerifyingIsRaceFree(t *testing.T) {
 		go func() {
 			defer readers.Done()
 			for j := 0; j < 50; j++ {
-				p, _, err := v.Verify(context.Background(), token)
+				p, dropped, err := v.Verify(context.Background(), token)
 				if err != nil {
 					t.Errorf("Verify during a swap: %v", err)
 					return
 				}
-				if p.Compartments == 0 {
-					t.Error("a fold during a swap saw no taxonomy at all")
+				switch {
+				case len(dropped) == 0:
+					// genA: both names declared, so the principal holds two
+					// bits and the registry that folded them says so.
+					if got := genA.Names(p.Compartments); len(got) != 2 {
+						t.Errorf("nothing was dropped, so both names resolved, "+
+							"but the principal holds %v", got)
+						return
+					}
+				case len(dropped) == 1 && dropped[0] == "pii-contact":
+					// genB: financial resolved, pii-contact is undeclared
+					// there and is dropped rather than refused.
+					if got := genB.Names(p.Compartments); len(got) != 1 ||
+						got[0] != "financial" {
+						t.Errorf("pii-contact was dropped, so this was genB, "+
+							"but the principal holds %v under it", got)
+						return
+					}
+				default:
+					t.Errorf("dropped = %v: no published generation could have "+
+						"produced that, so a fold read a half-installed one", dropped)
 					return
 				}
 			}
@@ -198,4 +221,73 @@ func TestSwappingWhileVerifyingIsRaceFree(t *testing.T) {
 	readers.Wait()
 	close(stop)
 	writer.Wait()
+}
+
+// The verifier's taxonomy and the CHAIN's taxonomy are two pointers that can
+// be on two clocks, and a compartment bitset means nothing away from the
+// registry that produced it (policy assigns bits by sorted index, so one
+// added declaration renumbers everything after it).
+//
+// So a request pins one generation: the surface puts the plane's registry on
+// the context and the fold uses THAT, whatever the verifier happens to be
+// holding. internal/serve/generation_test.go pins the consequence end to end;
+// this pins the precedence.
+func TestTheContextRegistryWinsOverTheConfiguredSource(t *testing.T) {
+	now := time.Now()
+	// The verifier's own source declares it. The request's generation does
+	// not, and the request is the one that decides.
+	src := authn.NewSwappable(registryOf(t, "financial", "pii-contact"))
+	v, key := swappableHarness(t, src)
+	token := sign(t, key, "k1", asserting(now, "financial", "pii-contact"))
+
+	ctx := authn.WithRegistry(context.Background(), registryOf(t, "financial"))
+	_, dropped, err := v.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(dropped) != 1 || dropped[0] != "pii-contact" {
+		t.Fatalf("dropped = %v, want [pii-contact]: the fold used the verifier's "+
+			"own generation instead of the request's", dropped)
+	}
+}
+
+// A context carrying no registry leaves the configured source deciding, so
+// every caller with no plane — the conformance runner, an embedder — is
+// untouched by the context path existing.
+func TestNoContextRegistryFallsBackToTheConfiguredSource(t *testing.T) {
+	now := time.Now()
+	src := authn.NewSwappable(registryOf(t, "financial", "pii-contact"))
+	v, key := swappableHarness(t, src)
+	token := sign(t, key, "k1", asserting(now, "financial", "pii-contact"))
+
+	if _, dropped, err := v.Verify(context.Background(), token); err != nil {
+		t.Fatalf("Verify: %v", err)
+	} else if len(dropped) != 0 {
+		t.Errorf("dropped = %v from a source declaring both names", dropped)
+	}
+}
+
+// Two taxonomies on one Config is a question with no good answer. Documenting
+// which wins is not the same as making the other one impossible, and a Config
+// carrying both is a caller who believes something untrue about their own
+// deployment — which is worth refusing rather than resolving.
+func TestAConfigSettingBothTaxonomiesIsRefused(t *testing.T) {
+	now := time.Now()
+	key, jwk := newKey(t, "k1")
+	srv := newJWKSServer(t, jwk)
+	v := authn.NewVerifier(authn.Config{
+		KeySet:            authn.NewKeySet(authn.KeySetConfig{URL: srv.URL}),
+		Issuers:           []string{"https://idp.example.com"},
+		Audience:          "garm",
+		Compartments:      registryOf(t, "financial"),
+		CompartmentSource: authn.NewSwappable(registryOf(t, "financial")),
+	})
+	_, _, err := v.Verify(context.Background(), sign(t, key, "k1", goodBody(now)))
+	if err == nil {
+		t.Fatal("a Config naming two taxonomies verified a token; one of them is " +
+			"being ignored and the operator has no way to know which")
+	}
+	if !strings.Contains(err.Error(), "CompartmentSource") {
+		t.Errorf("the refusal does not name the conflicting fields: %v", err)
+	}
 }

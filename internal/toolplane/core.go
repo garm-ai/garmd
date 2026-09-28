@@ -269,6 +269,20 @@ func (c *Core) AddTools(tools []ToolDef) error {
 	return nil
 }
 
+// Registry is the compartment taxonomy this Core decides with.
+//
+// Exposed because a Principal's compartments are a BITSET, and which bit a
+// name gets depends on the whole generation — policy assigns them by sorted
+// index over the declarations this Core was built from. So the fold that
+// produces a principal and the chain that reads it have to be on the same
+// generation, and the only way for a surface to guarantee that is to hand the
+// fold the registry the chain is using. See authn.WithRegistry.
+//
+// The Registry itself is immutable once built, so handing it out shares no
+// mutable state: a reload builds a new Core with a new one rather than
+// changing this.
+func (c *Core) Registry() *policy.Registry { return c.reg }
+
 // SetAvailability wires step 6's AvailabilitySource (svcwatch.go's
 // ServiceWatcher, in production). It is a separate call from NewCore rather
 // than a CoreConfig field because it is optional in exactly the way FGA and

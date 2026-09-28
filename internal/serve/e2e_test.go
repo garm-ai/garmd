@@ -73,18 +73,25 @@ func newIDP(t *testing.T) *idp {
 // do.
 func (i *idp) mint(t *testing.T, clearance string, verbs []string, exp time.Duration) string {
 	t.Helper()
+	return i.mintGarm(t, map[string]any{
+		"clearance": clearance,
+		"kind":      "USER",
+		"verbs":     verbs,
+	}, exp)
+}
+
+// mintGarm is mint with the `garm` claim written out in full, for the tests
+// that need one it does not take — compartments, in particular.
+func (i *idp) mintGarm(t *testing.T, garm map[string]any, exp time.Duration) string {
+	t.Helper()
 	now := time.Now()
 	body := map[string]any{
-		"iss": e2eIssuer,
-		"sub": "user:e2e",
-		"aud": "garm",
-		"iat": now.Unix(),
-		"exp": now.Add(exp).Unix(),
-		"garm": map[string]any{
-			"clearance": clearance,
-			"kind":      "USER",
-			"verbs":     verbs,
-		},
+		"iss":  e2eIssuer,
+		"sub":  "user:e2e",
+		"aud":  "garm",
+		"iat":  now.Unix(),
+		"exp":  now.Add(exp).Unix(),
+		"garm": garm,
 	}
 	signer, err := jose.NewSigner(
 		jose.SigningKey{Algorithm: jose.ES256, Key: i.key},

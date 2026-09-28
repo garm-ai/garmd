@@ -51,13 +51,19 @@ type Config struct {
 	// against. Required unless CompartmentSource is set.
 	Compartments *policy.Registry
 
-	// CompartmentSource, when set, REPLACES Compartments and is read once per
-	// verification — so a catalogue reload that declares a new compartment
-	// reaches the next token rather than the next restart.
+	// CompartmentSource is Compartments for a caller whose taxonomy changes:
+	// it is read once per verification, so a catalogue reload that declares a
+	// new compartment reaches the next token rather than the next restart.
 	//
-	// Both exist because most callers have one fixed taxonomy (every test
-	// here, the conformance runner) and only the daemon reloads. A Config
-	// carrying both uses this one.
+	// Exactly one of the two must be set. Both exist because most callers
+	// have one fixed taxonomy (every test here, the conformance runner) and
+	// only the daemon reloads; a Config naming both is refused, because
+	// picking one silently would leave an operator believing something untrue
+	// about which declarations are deciding.
+	//
+	// Neither outranks a registry pinned on the request by WithRegistry. A
+	// surface that has read a catalogue generation knows which taxonomy will
+	// INTERPRET the bitset this fold produces, and that one wins.
 	CompartmentSource Compartments
 
 	// Skew tolerated on exp/nbf/iat. Clocks disagree; without it a token
@@ -70,6 +76,16 @@ type Config struct {
 // Verifier turns a signed token into a Principal.
 type Verifier struct {
 	cfg Config
+	// cfgErr is a Config that cannot be served, detected at construction and
+	// returned by every Verify.
+	//
+	// It is held rather than returned because NewVerifier has never had an
+	// error to return and every embedder's call site would change to add one.
+	// The refusal itself is not softened: Verify is the only thing a Verifier
+	// does, and it refuses on the first call rather than on some later
+	// condition, so the misconfiguration surfaces at the first request rather
+	// than being resolved behind the operator's back.
+	cfgErr error
 }
 
 // DefaultSkew is the clock tolerance applied to a token's time claims, and it
@@ -88,7 +104,13 @@ func NewVerifier(cfg Config) *Verifier {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Verifier{cfg: cfg}
+	v := &Verifier{cfg: cfg}
+	if cfg.Compartments != nil && cfg.CompartmentSource != nil {
+		v.cfgErr = fmt.Errorf("authn: Config sets both Compartments and " +
+			"CompartmentSource; set one, because two taxonomies is two answers " +
+			"to which compartments exist")
+	}
+	return v
 }
 
 // Verify checks a token's signature and registered claims, then folds the
@@ -107,7 +129,10 @@ func NewVerifier(cfg Config) *Verifier {
 // silently narrowing the caller's authority without saying so turns that typo
 // into an unexplained permission denial.
 func (v *Verifier) Verify(ctx context.Context, token string) (*toolplane.Principal, []string, error) {
-	reg := v.compartments()
+	if v.cfgErr != nil {
+		return nil, nil, v.cfgErr
+	}
+	reg := v.compartments(ctx)
 	if v.cfg.KeySet == nil || reg == nil ||
 		len(v.cfg.Issuers) == 0 || v.cfg.Audience == "" {
 		return nil, nil, fmt.Errorf("authn: verifier is not configured")
@@ -166,7 +191,17 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*toolplane.Princip
 // between two levels of one delegation chain intersect authority across two
 // generations, which is the mixed-generation failure immutability exists to
 // prevent.
-func (v *Verifier) compartments() *policy.Registry {
+//
+// The request wins over the Config. A compartment bitset is only meaningful
+// against the registry that produced it (see Compartments), so the taxonomy
+// that matters is the one the CHAIN will read the answer with — and a surface
+// that has pinned its generation on the context is telling us exactly which
+// that is. Falling back to the Config is for callers with no plane: the
+// conformance runner, embedders, and every test in this package.
+func (v *Verifier) compartments(ctx context.Context) *policy.Registry {
+	if reg := registryFrom(ctx); reg != nil {
+		return reg
+	}
 	if v.cfg.CompartmentSource != nil {
 		return v.cfg.CompartmentSource.Registry()
 	}

@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	"github.com/garm-ai/garm/policy"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/tool"
 	"github.com/garm-ai/garmd/internal/toolplane"
@@ -27,6 +28,16 @@ import (
 type plane struct {
 	cat  *catalogue.Catalogue
 	core *toolplane.Core
+
+	// reg is core's own compartment taxonomy, lifted out so the handler can
+	// pin it on the request.
+	//
+	// A folded compartment bitset is meaningful only against the registry
+	// that produced it, and the one that has to read this request's answer is
+	// this core's. Holding it here rather than reaching through core at every
+	// request is so that "the generation this request is on" is one value the
+	// handler reads once, beside the catalogue and the chain.
+	reg *policy.Registry
 }
 
 // planeFor returns the chain for this generation, building it on first sight.
@@ -100,7 +111,7 @@ func (h *Handler) newPlane(cat *catalogue.Catalogue) (*plane, error) {
 			return nil, fmt.Errorf("registering %s: %w", d.FullMethod, err)
 		}
 	}
-	return &plane{cat: cat, core: core}, nil
+	return &plane{cat: cat, core: core, reg: core.Registry()}, nil
 }
 
 // requestFactory builds an empty request from the catalogue's descriptor.
