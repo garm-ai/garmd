@@ -268,6 +268,7 @@ func defFor(fd protoreflect.FileDescriptor, svc protoreflect.ServiceDescriptor,
 		Reversibility: p.GetEffects().GetReversibility(),
 		External:      p.GetEffects().GetExternal(),
 
+		WhenToUse:    p.GetGuidance().GetWhenToUse(),
 		WhenNotToUse: p.GetGuidance().GetWhenNotToUse(),
 		OnError:      p.GetGuidance().GetOnError(),
 	}

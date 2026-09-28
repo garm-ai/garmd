@@ -228,6 +228,7 @@ func sameDeclarationAs(t, o ToolDef) bool {
 		t.Idempotent == o.Idempotent &&
 		t.Reversibility == o.Reversibility &&
 		t.External == o.External &&
+		t.WhenToUse == o.WhenToUse &&
 		t.WhenNotToUse == o.WhenNotToUse &&
 		t.OnError == o.OnError &&
 		maps.Equal(t.FieldDocs, o.FieldDocs)

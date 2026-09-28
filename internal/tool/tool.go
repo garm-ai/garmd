@@ -103,6 +103,11 @@ type Def struct {
 	// WhenNotToUse is consistently worth more than a longer description:
 	// wrong-tool selection beats wrong-argument construction as a source of
 	// agent error.
+	//
+	// All three are carried because all three are published: a projection that
+	// dropped one would make an author's declaration disappear between the
+	// .proto and the model, with nothing failing.
+	WhenToUse    string
 	WhenNotToUse string
 	OnError      string
 

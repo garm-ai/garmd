@@ -62,6 +62,17 @@ small catalogue against a bucket holding a large bad one carries both.
   on successful responses only, so a refusal says which row explains it but
   not which catalogue decided it. Widening it is a small change nobody has
   needed yet.
+- **`ListTools`** — `POST /garm.v1.ToolCatalogService/ListTools`, bearer token,
+  `{}`. Answers the tools this caller may see, each with its FQN, route, verb,
+  approval mode, material fields, the author's guidance prose and the input
+  schema projected at the caller's own shape. It is not a tool: it mounts
+  nothing, crosses no hop, and writes no ledger row on success. Unauthenticated
+  is 401 with a row, through the same path the tool route uses.
+
+  The listing is `Core.Catalog`, which is the same visibility predicate step 2
+  denies with — so it cannot advertise a tool the chain would refuse. A second,
+  hand-written list would agree today and stop agreeing the first time either
+  changed, and the symptom would be a model attempting a tool it can never call.
 - Reconciliation. A service advertises its descriptor hash; the catalogue
   records one per proto package; `garmd` compares them every 30s and refuses
   to route on a mismatch. Silence is not agreement, and a failed sweep leaves
@@ -262,9 +273,10 @@ will later want a row for. Wiring the reconciler in as the chain's
 `AvailabilitySource` would fix it; the two checks would then need deciding
 between rather than both existing.
 
-**No MCP surface, no catalogue service, no second listener.** The dev IdP's
-tool-list panel needs the catalogue service and reports that it cannot reach
-garm until then.
+**No MCP surface and no second listener.** `ListTools` is on the main listener
+and speaks JSON over Connect's unary shape, not MCP's `tools/list`. Serving
+both from this one projection is the intended next step, and until it happens an
+MCP client has nothing here to talk to.
 
 ## Drift with devkit is caught, for the personas devkit.json covers
 

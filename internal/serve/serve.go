@@ -198,6 +198,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// After step 1 and before the route lookup, because it is not a route: it
+	// is the catalogue itself, projected. Reaching it means having said who you
+	// are, exactly as reaching a tool does.
+	if r.URL.Path == ListToolsPath {
+		h.listTools(w, pl, principal)
+		return
+	}
+
 	def, ok := lookup(cat, r.URL.Path)
 	if !ok {
 		// "unimplemented" — this build does not serve it. Distinct from the

@@ -72,6 +72,53 @@ process, and a single key set for both would let either sign for the other.
 `POST /pkg.Service/Method`, dispatched dynamically from the catalogue's
 descriptors and answered through the chain.
 
+Beside it is one endpoint that is not a tool. `POST
+/garm.v1.ToolCatalogService/ListTools`, with a bearer token and a `{}` body,
+answers what this caller may call:
+
+```json
+{
+  "catalogue_digest": "sha256:…",
+  "tools": [
+    {
+      "fqn": "acme.v1.get_balance",
+      "method": "/acme.v1.AccountsService/GetBalance",
+      "title": "Read a balance",
+      "description": "…",
+      "verb": "VERB_READ",
+      "approval_mode": "MODE_NONE",
+      "material_fields": [],
+      "guidance": {"when_to_use": "…", "when_not_to_use": "…", "on_error": "…"},
+      "input_schema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "…": "…"}
+    }
+  ]
+}
+```
+
+**What it leaves out is the point.** A tool this caller could not call is not
+in the list at all, and the filter is not a second rule that agrees with the
+chain: it is the same visibility predicate step 2 denies with — clearance,
+compartments, verb and tool-set scope, folded against the generation serving
+this request. So the listing cannot advertise a tool the chain would refuse,
+and a caller cleared for none gets `"tools": []` rather than an error. Existence
+is itself information, which is why an omitted tool is omitted rather than
+marked as denied. The input schema is likewise projected at this caller's own
+shape, so a field they may not write is not in the schema they are shown.
+
+The body carries no policy: no clearance, no compartment names, no redaction
+plan, nothing about any other caller. Everything in it is something the caller
+can act on — including `approval_mode` and `material_fields`, which are what it
+needs to go and obtain a grant before calling a gated tool. Enums are spelled
+as their names, the way protojson spells them, so a consumer needs no copy of
+the enum; a tool that declares no approval block reads `MODE_UNSPECIFIED`.
+
+`catalogue_digest` is in the body and on `Garm-Catalogue-Digest`, and it is the
+generation this request pinned, read once: a listing is one generation's,
+whole, even when a reload lands while it is being answered. A successful listing
+writes no ledger row — a catalogue polled every turn would bury the calls under
+the listings — but an unauthenticated one is a 401 with a row, through the same
+step 1 the tool route uses, and carries that row's `Garm-Event-Id`.
+
 Every answer that produced a ledger row carries `Garm-Event-Id` — the id of
 that row, which is how a caller joins its own record of a call to the ledger's.
 That is successes and every refusal the chain decided: the 401, the `not_found`
