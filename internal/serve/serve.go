@@ -354,11 +354,24 @@ func (h *Handler) writeChainErr(w http.ResponseWriter, def tool.Def, err error) 
 		return
 	}
 
-	// An approval WAS presented and is not good for this call. That is a
-	// denial: the caller must stop, not fetch another approval, and nobody
-	// should be paged. Without this it arrives carrying no connect code,
+	// An approval WAS presented and is not good for this call, or could not be
+	// checked at all. Either way a denial: the caller must stop rather than
+	// fetch another approval, and must not be told which of the two it was —
+	// "we could not check" tells a prober when this deployment's dependencies
+	// are down. Without this branch it arrives carrying no connect code,
 	// becomes "internal", and answers 500.
-	if errors.Is(err, grants.ErrRefused) {
+	if errors.Is(err, grants.ErrRefused) || errors.Is(err, grants.ErrUnavailable) {
+		// The operator's half of the same answer. A caller presenting a
+		// tampered approval is the system working and is deliberately NOT
+		// logged here; a verifier that is half-configured, a key set that
+		// could not be fetched or a replay cache that could not answer is this
+		// deployment failing, and the one person who can fix it is the one
+		// person the wire cannot tell. The grant itself is never logged: the
+		// verifier's sentences carry no token, by construction.
+		if h.Log != nil && errors.Is(err, grants.ErrUnavailable) {
+			h.Log.Error("an approval could not be checked; this deployment cannot "+
+				"verify grants right now", "fqn", def.FQN, "err", err)
+		}
 		refuse(w, connect.NewError(connect.CodePermissionDenied, err))
 		return
 	}

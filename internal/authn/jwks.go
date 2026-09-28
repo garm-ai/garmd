@@ -3,6 +3,7 @@ package authn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +35,17 @@ const (
 	// would otherwise stream until memory ran out, before any parsing.
 	maxKeySetBytes = 1 << 20
 )
+
+// ErrNoSuchKey means the key set does not publish the kid a token names.
+//
+// Distinct from every other failure of Key because it is the only one that is
+// the CALLER's fault: the set was fetched and read, and the token names a key
+// that is not in it. Every other error — a refused fetch, a stale set that
+// could not be refreshed, an endpoint answering something that is not a key
+// set — means this process could not find out, which is an operator's problem.
+// Without the difference a caller presenting a garbage kid and an IdP that is
+// down are the same error, so one of them is always reported as the other.
+var ErrNoSuchKey = errors.New("no such key in the key set")
 
 // KeySetConfig configures a KeySet. Only URL is required.
 type KeySetConfig struct {
@@ -121,7 +133,7 @@ func (k *KeySet) Key(ctx context.Context, kid string) (jose.JSONWebKey, error) {
 		// Unknown kid against a fresh set: either a rotation we have not
 		// seen, or a token we will reject. Rate-limit the difference.
 		if k.now().Sub(k.lastAttempt) < k.refreshCooldown {
-			return jose.JSONWebKey{}, fmt.Errorf("authn: no key %q in the key set", kid)
+			return jose.JSONWebKey{}, fmt.Errorf("authn: %w: %q", ErrNoSuchKey, kid)
 		}
 	}
 
@@ -130,7 +142,7 @@ func (k *KeySet) Key(ctx context.Context, kid string) (jose.JSONWebKey, error) {
 	}
 	key, ok := k.keys[kid]
 	if !ok {
-		return jose.JSONWebKey{}, fmt.Errorf("authn: no key %q in the key set", kid)
+		return jose.JSONWebKey{}, fmt.Errorf("authn: %w: %q", ErrNoSuchKey, kid)
 	}
 	return key, nil
 }

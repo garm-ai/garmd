@@ -23,21 +23,47 @@ import (
 // wire would say which of several things an attacker got right.
 var ErrGrantRequired = errors.New("a human grant is required")
 
-// ErrRefused means an approval WAS presented and is not good for this call:
-// wrong tool, wrong subject, too old, already spent, or minted against
-// material that differs from what is being sent.
+// ErrRefused means an approval WAS presented, was CHECKED, and is not good
+// for this call: not a well-formed token, signed by a key the issuer does not
+// publish, wrong issuer, wrong audience, wrong tool, wrong subject, carrying a
+// delegation chain, too old, already spent, or minted against material that
+// differs from what is being sent.
 //
-// One sentinel for all of them, deliberately. Distinguishing them on the wire
-// would tell an attacker which of several things they got right, and every one
-// of them is the same answer to the caller: stop. It is separate from
-// ErrGrantRequired because that one is the opposite answer — go and get an
-// approval — and a caller told to fetch one when it had just presented a
-// tampered one would do exactly that, forever.
+// Every one of them is the CALLER's fault. One sentinel for all of them,
+// deliberately: distinguishing them on the wire would tell an attacker which
+// of several things they got right, and every one is the same answer — stop.
+// It is separate from ErrGrantRequired because that one is the opposite answer
+// — go and get an approval — and a caller told to fetch one when it had just
+// presented a tampered one would do exactly that, forever.
+//
+// It is separate from ErrUnavailable because that one is not the caller's
+// fault at all, and the two must be distinguishable by anything that decides
+// whether to wake an operator. What they share is the answer on the wire.
 //
 // It exists so a surface can answer PERMISSION_DENIED. Without it these
 // refusals reach the surface carrying no code at all and are answered
 // "internal", which pages an operator for a caller's own mistake.
 var ErrRefused = errors.New("the approval presented is not valid for this call")
+
+// ErrUnavailable means the approval could not be CHECKED.
+//
+// Three shapes, and none of them is the caller's fault: this verifier is
+// half-configured, the key set that signs approvals could not be fetched, or
+// the replay cache could not answer whether the grant was already spent.
+//
+// It still refuses, and it still answers PERMISSION_DENIED on the wire. Not
+// because the grant was bad — nobody knows — but because the alternative is
+// running an approval-gated tool on an approval nobody verified, and because a
+// caller cannot act differently on "denied" than on "we could not check": both
+// mean stop, and saying which would tell a prober when this deployment's
+// dependencies are down.
+//
+// What it changes is the OPERATOR's view. Wrapped separately so the surface
+// can log exactly these at error level and leave the caller's own bad
+// approvals unlogged — otherwise an IdP outage looks like a spike of people
+// presenting tampered grants, and the one person who can fix it is the one
+// person not told.
+var ErrUnavailable = errors.New("the approval could not be checked")
 
 // Verifier is step 5.
 type Verifier struct {
@@ -85,14 +111,17 @@ func grantFrom(ctx context.Context) string {
 
 // Verify implements toolplane.GrantVerifier.
 //
-// Every refusal except ErrGrantRequired is wrapped in ErrRefused, so the
+// Every refusal that is the CALLER's fault is wrapped in ErrRefused, so the
 // surface can classify it without knowing anything about grants, and the
-// original sentence survives underneath for the ledger.
+// original sentence survives underneath for the ledger. ErrGrantRequired and
+// ErrUnavailable are already the answer they need to be and pass through: the
+// first is the one refusal with a next move, the second is this deployment's
+// own failure and is the one the operator has to be told about.
 func (v *Verifier) Verify(
 	ctx context.Context, p *toolplane.Principal, t toolplane.ToolDef, req proto.Message,
 ) error {
 	err := v.verify(ctx, p, t, req)
-	if err == nil || errors.Is(err, ErrGrantRequired) {
+	if err == nil || errors.Is(err, ErrGrantRequired) || errors.Is(err, ErrUnavailable) {
 		return err
 	}
 	return fmt.Errorf("%w: %w", ErrRefused, err)
@@ -111,7 +140,7 @@ func (v *Verifier) verify(
 		// grant-gated tools through would be the single worst failure in this
 		// package, and AddTools only mounted the tool because something
 		// claimed this seam existed.
-		return fmt.Errorf("the grant verifier is not configured")
+		return fmt.Errorf("%w: the grant verifier is not configured", ErrUnavailable)
 	}
 
 	raw := grantFrom(ctx)
@@ -142,8 +171,11 @@ func (v *Verifier) verify(
 				"authorises one call")
 		}
 		// Could not find out. Refuses, because a replay cache that fails open
-		// during an outage is one an attacker only has to wait for.
-		return fmt.Errorf("the grant could not be checked for reuse: %w", err)
+		// during an outage is one an attacker only has to wait for — and says
+		// so as ErrUnavailable, because the caller did nothing wrong and the
+		// broker being down is nobody's problem but the operator's.
+		return fmt.Errorf("%w: the grant could not be checked for reuse: %w",
+			ErrUnavailable, err)
 	}
 	return nil
 }
@@ -169,7 +201,14 @@ func (v *Verifier) parse(ctx context.Context, raw string) (*grantClaims, error) 
 	}
 	key, err := v.Keys.Key(ctx, kid)
 	if err != nil {
-		return nil, fmt.Errorf("the grant's key: %w", err)
+		// A kid the issuer does not publish is a grant we can judge: bad. Any
+		// other failure of Key means the key set could not be read at all, so
+		// nothing has been judged and the operator is the one who needs to
+		// know — the first grant to arrive while the STS is down lands here.
+		if errors.Is(err, authn.ErrNoSuchKey) {
+			return nil, fmt.Errorf("the grant's key: %w", err)
+		}
+		return nil, fmt.Errorf("%w: the keys that sign approvals: %w", ErrUnavailable, err)
 	}
 	payload, err := sig.Verify(key)
 	if err != nil {

@@ -76,15 +76,39 @@ approval — issuer, audience, tool, subject, age against the tool's own ceiling
 approver seniority, and the material digest over the values the human actually
 saw — and `internal/replay` makes it single-use through the `GARM_GRANTS_SPENT`
 JetStream bucket, atomically and across replicas. `garmd serve --grant-issuer`
-builds both, checks the bucket's retention against the longest
-`max_grant_age_seconds` the catalogue declares, and refuses to start if the
-cache would forget a grant while it is still valid. Without the flag there is
-no verifier and a MODE_GRANT catalogue does not mount.
+builds both, sizes the bucket by the longest `max_grant_age_seconds` the
+catalogue declares, checks that against the retention the bucket actually has,
+and refuses to start if the cache would forget a grant while it is still valid.
+The clock tolerance is `authn.DefaultSkew`, the same 60 seconds the token path
+allows, so a token that verifies and an approval that does not cannot be the
+same clock. Without the flag there is no verifier and a MODE_GRANT catalogue
+does not mount.
+
+**A MODE_GRANT tool with no `max_grant_age_seconds` will not start.** Without a
+ceiling the age check is skipped and an approval is valid for whatever `exp` the
+issuer minted, which the tool's author cannot cap and the cache cannot be sized
+to outlast — so the grant would be replayable after its spent-record expired.
+The refusal names the tool.
+
+*The bucket's expiry is derived once, at startup, from the boot catalogue.* A
+reload (Task 10) that lengthens a ceiling, or that introduces the first gated
+tool into a process started without one, does not re-derive or re-check it: the
+bucket keeps the expiry it was created with until a restart, and a grant longer
+than that expiry is replayable in the gap. The same shape as the verifier's
+compartment registry, further down this file: derived from the boot catalogue
+and not revisited.
 
 A presented approval that is not good for this call — wrong tool, wrong
 subject, too old, already spent, material that differs from what was approved —
 is a `permission_denied`, not a `grant_required`: a caller told to fetch another
 approval after tampering with one would do exactly that.
+
+An approval that could not be CHECKED — a half-configured verifier, a key set
+that could not be fetched, a replay cache that could not answer — is the same
+`permission_denied` on the wire, because the caller did nothing different and
+saying which would tell a prober when this deployment's dependencies are down.
+It differs for the operator: only these are logged at error level, naming the
+tool and never the grant.
 
 The refusal reads what THIS Core was configured with, not what the build
 contains, so supplying a verifier makes the same tool mount. It is an

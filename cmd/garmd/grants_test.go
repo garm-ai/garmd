@@ -2,16 +2,28 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	jose "github.com/go-jose/go-jose/v4"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/catalogue"
+	"github.com/garm-ai/garmd/internal/grants"
 	"github.com/garm-ai/garmd/internal/tool"
+	"github.com/garm-ai/garmd/internal/toolplane"
 )
 
 // Nil is the configured answer, and it must be a nil INTERFACE.
@@ -156,4 +168,208 @@ func jetstreamConn(t *testing.T) *nats.Conn {
 	}
 	t.Cleanup(nc.Close)
 	return nc
+}
+
+// (Fix round 1, item 1) A MODE_GRANT tool with no ceiling must not be served.
+//
+// Without a max_grant_age the tool's approval is bounded only by the token's
+// own exp, which the issuer chooses and the tool cannot cap — so there is no
+// number to size the replay cache from, and a grant valid for a day against a
+// cache that forgets in an hour is replayable for twenty-three of them. The
+// refusal has to name the tool, because "some tool is missing a ceiling" sends
+// an operator to read a whole catalogue.
+func TestAGatedToolWithNoCeilingRefusesToStart(t *testing.T) {
+	cat := gatedCatalogue(t)
+	cat.Defs = append(cat.Defs, tool.Def{
+		FQN:          "t.v1.wire_transfer",
+		ApprovalMode: toolv1.Approval_MODE_GRANT,
+	})
+
+	_, err := grantVerifier(context.Background(), nil, cat, serveOpts{
+		jwksURL: "https://idp.test/jwks.json", audience: "garm",
+		grantIssuer: "https://sts.test",
+	})
+	if err == nil {
+		t.Fatal("a MODE_GRANT tool with no max_grant_age was accepted; its approval " +
+			"is bounded only by the issuer's exp and the replay cache cannot be sized")
+	}
+	if !strings.Contains(err.Error(), "t.v1.wire_transfer") {
+		t.Errorf("the refusal does not name the tool: %v", err)
+	}
+	if !strings.Contains(err.Error(), "max_grant_age") {
+		t.Errorf("the refusal does not name what is missing: %v", err)
+	}
+}
+
+// The bucket is sized by the LONGEST ceiling the catalogue declares, not by
+// the first one or by a constant. A cache sized by the shortest would forget a
+// longer tool's approval while it was still spendable.
+func TestTheBucketIsSizedByTheLongestCeiling(t *testing.T) {
+	cat := gatedCatalogue(t) // 15m
+	cat.Defs = append(cat.Defs, tool.Def{
+		FQN:          "t.v1.slow",
+		ApprovalMode: toolv1.Approval_MODE_GRANT,
+		MaxGrantAge:  2 * time.Hour,
+	})
+
+	v, err := grantVerifier(context.Background(), jetstreamConn(t), cat, serveOpts{
+		jwksURL: "https://idp.test/jwks.json", audience: "garm",
+		grantIssuer: "https://sts.test",
+	})
+	if err != nil {
+		t.Fatalf("grantVerifier: %v", err)
+	}
+	ver, ok := v.(*grants.Verifier)
+	if !ok {
+		t.Fatalf("grantVerifier built a %T", v)
+	}
+	if got := ver.Spent.Retention(); got != 2*time.Hour {
+		t.Errorf("the replay cache keeps entries for %s; the catalogue's longest "+
+			"approval is 2h and a shorter cache is replayable in the gap", got)
+	}
+}
+
+// (Fix round 1, item 2) The clock tolerance is the token path's.
+//
+// Two tolerances in one process that differ is how a caller ends up with a
+// token that verifies and an approval that does not, with nothing in either
+// message to say the clocks are what disagreed. Exercised through the
+// DAEMON-built verifier, because a test that sets Skew itself proves nothing
+// about what garmd serve constructs.
+func TestTheDaemonBuiltVerifierUsesTheTokenPathsClockSkew(t *testing.T) {
+	idp := newGrantIDP(t)
+	v, err := grantVerifier(context.Background(), jetstreamConn(t), gatedCatalogue(t),
+		serveOpts{
+			jwksURL: idp.url, audience: cmdGrantAudience,
+			grantIssuer: cmdGrantIssuer,
+		})
+	if err != nil {
+		t.Fatalf("grantVerifier: %v", err)
+	}
+
+	def := gatedCatalogue(t).Defs[0]
+	p := &toolplane.Principal{Subject: "user:test"}
+
+	// Expired half a minute ago. Inside the tolerance, so it is accepted —
+	// the same answer the token path gives a token half a minute stale.
+	ctx := grants.WithGrant(context.Background(),
+		idp.mintGrant(t, "user:test", -30*time.Second))
+	if err := v.Verify(ctx, p, def, nil); err != nil {
+		t.Errorf("a grant that expired 30s ago was refused, so the clock tolerance "+
+			"is shorter than the token path's %s: %v", authn.DefaultSkew, err)
+	}
+
+	// Two minutes stale is outside it, and must be refused — a tolerance that
+	// accepted this would be an expiry nobody set.
+	ctx = grants.WithGrant(context.Background(),
+		idp.mintGrant(t, "user:test", -2*time.Minute))
+	if err := v.Verify(ctx, p, def, nil); err == nil {
+		t.Error("a grant that expired two minutes ago was accepted; the tolerance " +
+			"is longer than the token path's")
+	}
+}
+
+// (Fix round 1, item 5) --grant-jwks and --grant-audience without
+// --grant-issuer are silently inert: step 5 stays off, and the operator who
+// typed two of the three flags believes it is on. Say so at startup.
+func TestGrantFlagsAreAllOrNone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		o    serveOpts
+		want string
+	}{
+		{"jwks without issuer",
+			serveOpts{jwksURL: "https://idp.test/jwks.json", audience: "garm",
+				grantJWKS: "https://sts.test/jwks.json"},
+			"--grant-jwks"},
+		{"audience without issuer",
+			serveOpts{jwksURL: "https://idp.test/jwks.json", audience: "garm",
+				grantAudience: "garm://garmd"},
+			"--grant-audience"},
+		{"issuer with no key set anywhere",
+			serveOpts{audience: "garm", grantIssuer: "https://sts.test"},
+			"--grant-jwks"},
+		{"issuer with no audience anywhere",
+			serveOpts{jwksURL: "https://idp.test/jwks.json",
+				grantIssuer: "https://sts.test"},
+			"--grant-audience"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), tc.o)
+			if err == nil {
+				t.Fatalf("a half-given grant configuration was accepted: %+v", tc.o)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the refusal does not name %s: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+const (
+	cmdGrantIssuer   = "https://sts.test"
+	cmdGrantAudience = "garm://garmd"
+)
+
+// grantIDP mints approvals the daemon-built verifier will accept, over a real
+// JWKS endpoint — the key fetch is part of what is under test.
+type grantIDP struct {
+	url string
+	key *ecdsa.PrivateKey
+	n   atomic.Int64
+}
+
+func newGrantIDP(t *testing.T) *grantIDP {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+		Key: key.Public(), KeyID: "g1", Algorithm: string(jose.ES256), Use: "sig",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(raw)
+	}))
+	t.Cleanup(srv.Close)
+	return &grantIDP{url: srv.URL, key: key}
+}
+
+// mintGrant signs an approval expiring at now+expiresIn, which the tests pass
+// NEGATIVE to mint one that is already stale.
+func (i *grantIDP) mintGrant(t *testing.T, subject string, expiresIn time.Duration) string {
+	t.Helper()
+	now := time.Now()
+	body, err := json.Marshal(map[string]any{
+		"iss": cmdGrantIssuer,
+		"aud": cmdGrantAudience,
+		"jti": fmt.Sprintf("g-%d", i.n.Add(1)),
+		"iat": now.Add(-time.Minute).Unix(),
+		"exp": now.Add(expiresIn).Unix(),
+		"garm_grant": map[string]any{
+			"tool":     "t.v1.pay",
+			"subject":  subject,
+			"approver": "employee:amir",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: i.key},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "g1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj, err := signer.Sign(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := obj.CompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
 }

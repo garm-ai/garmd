@@ -63,9 +63,18 @@ type Verifier struct {
 	cfg Config
 }
 
+// DefaultSkew is the clock tolerance applied to a token's time claims, and it
+// is exported because the GRANT path has to use the same number.
+//
+// Two tolerances in one process that differ is how a caller ends up holding a
+// token that verifies and an approval that does not, with nothing in either
+// refusal to say the clocks are what disagreed. Naming it once makes them the
+// same value by construction rather than by two literals that happen to match.
+const DefaultSkew = 60 * time.Second
+
 func NewVerifier(cfg Config) *Verifier {
 	if cfg.Skew == 0 {
-		cfg.Skew = 60 * time.Second
+		cfg.Skew = DefaultSkew
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
