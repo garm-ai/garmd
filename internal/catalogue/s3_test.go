@@ -2,6 +2,7 @@ package catalogue_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -272,5 +273,30 @@ func TestDigestOfIsOverTheBytesAsGiven(t *testing.T) {
 	}
 	if catalogue.DigestOf([]byte("a")) == catalogue.DigestOf([]byte("b")) {
 		t.Error("two different artifacts have the same digest")
+	}
+}
+
+// An object past the ceiling and a store that will not answer are different
+// events, and only the caller can act on the difference: the first is an
+// artifact this process refuses and will refuse identically for as long as it
+// sits there, the second is a store that may answer the next time it is asked.
+// A poller that could not tell them apart would either re-transfer the ceiling
+// every thirty seconds or stop retrying a store that came back.
+func TestAnObjectOverTheCeilingIsDistinguishableFromAStoreFailure(t *testing.T) {
+	body := make([]byte, catalogue.MaxBytes+1)
+	_, client := newFakeS3(t, body, `"abc"`)
+	_, err := source(client).Read(context.Background())
+	if !errors.Is(err, catalogue.ErrTooLarge) {
+		t.Errorf("an object over the ceiling is not ErrTooLarge: %v", err)
+	}
+
+	fake, client := newFakeS3(t, nil, `"abc"`)
+	fake.code = http.StatusInternalServerError
+	_, err = source(client).Read(context.Background())
+	if err == nil {
+		t.Fatal("a 500 was read as an object")
+	}
+	if errors.Is(err, catalogue.ErrTooLarge) {
+		t.Errorf("a store failure reads as an object over the ceiling: %v", err)
 	}
 }

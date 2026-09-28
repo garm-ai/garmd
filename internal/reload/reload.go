@@ -17,6 +17,7 @@ package reload
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -111,7 +112,44 @@ type Poller struct {
 	// etag of the generation now serving. Only Run and Once touch it, and they
 	// are the same goroutine.
 	etag string
+
+	// last is the object that was REFUSED, kept so that the next poll can
+	// reconsider it without fetching it again. Same goroutine as etag.
+	last refusal
 }
+
+// refusal is the last object this poller would not take.
+//
+// It is kept because a refused object has to be RECONSIDERED on every poll —
+// a refusal can lift without the object changing, when whatever refused it is
+// configured or restored — and reconsidering it must not mean downloading it
+// again. Some refusals never lift in process at all: a generation whose
+// approvals would outlive the replay cache is refused until someone restarts,
+// and re-transferring up to 256 MiB every thirty seconds to reach the same
+// sentence is an egress bill nobody predicted and a log nobody reads.
+//
+// The cost is that a refused artifact is HELD, so a process serving a small
+// catalogue against a bucket holding a large bad one carries both. It is
+// dropped the moment the object changes or a swap succeeds; see KNOWN-GAPS.md.
+type refusal struct {
+	etag string
+	// body is nil when the object could not be read at all — an artifact past
+	// the byte ceiling. There is nothing to reconsider then, only something
+	// not to fetch again.
+	body     []byte
+	digest   string
+	reported time.Time
+}
+
+// repeatRefusalEvery is how often an UNCHANGED refusal is restated.
+//
+// Not every poll. On the default interval that would be 2,880 identical error
+// lines a day, which is how the line that matters gets missed — and the state
+// is not news after the first one: the object has not changed and neither has
+// the answer. Restated at all, rather than once ever, because an operator who
+// starts reading the log an hour into the incident should not have to find the
+// beginning of it.
+const repeatRefusalEvery = time.Hour
 
 // Run polls until ctx is done.
 //
@@ -165,12 +203,45 @@ func (p *Poller) Once(ctx context.Context) Outcome {
 		return Unchanged
 	}
 
-	body, err := p.Source.Read(ctx)
-	if err != nil {
-		p.Log.Warn("the changed catalogue object could not be read; the generation "+
-			"now serving is unaffected",
-			"source", p.Source.String(), "serving", p.serving(), "etag", etag, "err", err)
-		return Kept
+	// The object this poll has to judge, fetched only if it is not the one
+	// already refused. Same ETag, same bytes: re-reading them would be a
+	// transfer that can only produce what is already in hand.
+	body, repeat := p.last.body, p.last.etag == etag
+	if repeat {
+		if body == nil {
+			// Refused because it could not be READ — past the ceiling. There
+			// is nothing to reconsider and nothing cheap to do: fetching it
+			// again would transfer the ceiling a second time to arrive at the
+			// same sentence.
+			p.report(repeat, "the catalogue object is still too large to read; the "+
+				"previous generation keeps serving",
+				"source", p.Source.String(), "serving", p.serving(), "etag", etag)
+			return Kept
+		}
+	} else {
+		p.forget()
+		read, err := p.Source.Read(ctx)
+		if err != nil {
+			if errors.Is(err, catalogue.ErrTooLarge) {
+				// A refusal of the ARTIFACT, not a store that would not
+				// answer: error rather than warning, and remembered, because
+				// it will be refused identically for as long as it sits there.
+				p.refuse(etag, nil, "")
+				p.report(false, "the changed catalogue object is too large to read; "+
+					"the previous generation keeps serving",
+					"source", p.Source.String(), "serving", p.serving(), "etag", etag,
+					"err", err)
+				return Kept
+			}
+			// A store that would not answer may answer next time, so this one
+			// is NOT remembered: the next poll fetches again.
+			p.Log.Warn("the changed catalogue object could not be read; the generation "+
+				"now serving is unaffected",
+				"source", p.Source.String(), "serving", p.serving(), "etag", etag,
+				"err", err)
+			return Kept
+		}
+		body = read
 	}
 
 	// The DIGEST decides, not the ETag. The ETag only says "look again":
@@ -183,24 +254,34 @@ func (p *Poller) Once(ctx context.Context) Outcome {
 	// Reading the object ONCE and validating those exact bytes is the other
 	// half: re-reading for the swap could take a different object, and then
 	// what was checked is not what is served.
-	candidate := catalogue.DigestOf(body)
+	candidate := p.last.digest
+	if !repeat {
+		candidate = catalogue.DigestOf(body)
+	}
 	if cur := p.Store.Current(); cur != nil && cur.Digest == candidate {
+		p.forget()
 		p.etag = etag
 		return Unchanged
 	}
 
 	// The pre-flight, on a candidate nothing is serving yet.
+	p.refuse(etag, body, candidate)
 	next, err := catalogue.Load(body, time.Now)
 	if err != nil {
-		p.Log.Error("the new catalogue does not load; the previous generation keeps serving",
+		p.report(repeat, "the new catalogue does not load; the previous generation "+
+			"keeps serving",
 			"source", p.Source.String(), "serving", p.serving(), "refused", candidate,
 			"err", err)
 		return Kept
 	}
-	reg, err := policy.NewRegistry(next.Compartments)
-	if err != nil {
-		p.Log.Error("the new catalogue's compartment declarations are unusable; the "+
-			"previous generation keeps serving",
+	// The value is discarded: what is published later is built from the
+	// generation that actually became current, not from this copy. Built here
+	// all the same, because declarations a registry cannot be made from are a
+	// reason to refuse, and finding that out after the swap would be finding
+	// it out too late.
+	if _, err := policy.NewRegistry(next.Compartments); err != nil {
+		p.report(repeat, "the new catalogue's compartment declarations are unusable; "+
+			"the previous generation keeps serving",
 			"source", p.Source.String(), "serving", p.serving(), "refused", candidate,
 			"err", err)
 		return Kept
@@ -209,7 +290,7 @@ func (p *Poller) Once(ctx context.Context) Outcome {
 	// chain for a generation already refused is work nobody will use.
 	if p.Admit != nil {
 		if err := p.Admit(next); err != nil {
-			p.Log.Error("the new catalogue is not covered by this deployment's "+
+			p.report(repeat, "the new catalogue is not covered by this deployment's "+
 				"configuration; the previous generation keeps serving",
 				"source", p.Source.String(), "serving", p.serving(), "refused", candidate,
 				"err", err)
@@ -220,8 +301,8 @@ func (p *Poller) Once(ctx context.Context) Outcome {
 		// The sharp one: a valid catalogue declaring supervision this
 		// deployment cannot apply. Serving it would run a tool ungated while
 		// its schema says it is supervised.
-		p.Log.Error("the new catalogue cannot be governed by this deployment; the "+
-			"previous generation keeps serving",
+		p.report(repeat, "the new catalogue cannot be governed by this deployment; "+
+			"the previous generation keeps serving",
 			"source", p.Source.String(), "serving", p.serving(), "refused", candidate,
 			"err", err)
 		return Kept
@@ -234,7 +315,7 @@ func (p *Poller) Once(ctx context.Context) Outcome {
 		Body: body, Name: p.Source.String(),
 	})
 	if err != nil {
-		p.Log.Error("the new catalogue was refused by the store; the previous "+
+		p.report(repeat, "the new catalogue was refused by the store; the previous "+
 			"generation keeps serving",
 			"source", p.Source.String(), "serving", was, "refused", candidate, "err", err)
 		return Kept
@@ -259,13 +340,52 @@ func (p *Poller) Once(ctx context.Context) Outcome {
 	// instant between the two is that a request pins the registry of the plane
 	// serving it (authn.WithRegistry) — this value is the fallback for a
 	// caller with no plane, and it must not be allowed to disagree for longer
-	// than these three lines.
+	// than these few lines.
+	//
+	// Built from SWAPPED rather than from the pre-flight copy: the two carry
+	// identical declarations, and the one worth publishing is the one taken
+	// from the generation that is actually current. Set ignores a nil, so a
+	// failure here leaves the working taxonomy in place — and it cannot fail,
+	// because the same declarations built a registry a moment ago.
+	reg, err := policy.NewRegistry(swapped.Compartments)
+	if err != nil {
+		p.Log.Error("the taxonomy of the generation now serving could not be built; "+
+			"the verifier keeps the previous one",
+			"serving", swapped.Digest, "err", err)
+	}
 	p.Compartments.Set(reg)
+	p.forget()
 	p.etag = etag
 	p.Log.Info("the catalogue was reloaded",
 		"source", p.Source.String(), "was", was, "now", swapped.Digest,
 		"tools", len(swapped.Defs), "etag", etag)
 	return Swapped
+}
+
+// refuse remembers the object that was just refused, so the next poll can
+// reconsider it without fetching it again.
+//
+// A different object resets the record, report time included: it is a new
+// refusal and an operator should hear about it now, not in an hour.
+func (p *Poller) refuse(etag string, body []byte, digest string) {
+	if p.last.etag != etag {
+		p.last = refusal{}
+	}
+	p.last.etag, p.last.body, p.last.digest = etag, body, digest
+}
+
+// forget drops the refused object, releasing its bytes.
+func (p *Poller) forget() { p.last = refusal{} }
+
+// report states a refusal, and states an unchanged one rarely. See
+// repeatRefusalEvery.
+func (p *Poller) report(repeat bool, msg string, args ...any) {
+	if repeat && !p.last.reported.IsZero() &&
+		time.Since(p.last.reported) < repeatRefusalEvery {
+		return
+	}
+	p.last.reported = time.Now()
+	p.Log.Error(msg, args...)
 }
 
 func (p *Poller) serving() string {

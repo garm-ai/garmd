@@ -335,6 +335,12 @@ func TestAnUnchangedETagDoesNotReRead(t *testing.T) {
 	if f.obj.heads() != 3 {
 		t.Errorf("%d HEADs for three polls", f.obj.heads())
 	}
+	// One GET at boot, and one on the first poll — which is the poll that
+	// learns the ETag of the object boot had already read. After that the
+	// header alone answers, and the artifact is not transferred again.
+	if got := f.obj.reads(); got != 2 {
+		t.Errorf("%d GETs for a boot and three polls of an unchanged object, want 2", got)
+	}
 }
 
 // A poller boots without knowing the object's ETag — the store read the bytes,
@@ -560,5 +566,130 @@ func TestRunPollsUntilItsContextIsDone(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after its context was cancelled")
+	}
+}
+
+// (Fix round 1, item 1) A refused object is examined again on every poll —
+// that is what lets a refusal lift without the object changing — but it is not
+// FETCHED again. Some refusals cannot lift in process at all: a generation
+// whose approvals outlive the replay cache is refused until someone restarts,
+// and re-downloading up to 256 MiB every thirty seconds to reach the same
+// sentence is a cost nobody asked for and an egress bill nobody predicted.
+func TestARefusedObjectIsNotDownloadedAgainWhileItsETagIsUnchanged(t *testing.T) {
+	f := newFixture(t, catalogueBytes(t, "get_status"))
+	was := f.store.Current()
+	f.poller.Admit = func(*catalogue.Catalogue) error {
+		return fmt.Errorf("the replay cache keeps an entry for 1h and a tool declares " +
+			"grants valid for 2h")
+	}
+
+	f.obj.put(catalogueBytes(t, "get_balance"), `"v2"`)
+	if got := f.poller.Once(context.Background()); got != reload.Kept {
+		t.Fatalf("outcome = %v, want Kept", got)
+	}
+	after := f.obj.reads()
+
+	for i := 0; i < 3; i++ {
+		if got := f.poller.Once(context.Background()); got != reload.Kept {
+			t.Fatalf("poll %d: outcome = %v, want Kept", i, got)
+		}
+	}
+	if f.obj.reads() != after {
+		t.Errorf("the refused object was downloaded %d more times while its ETag was "+
+			"unchanged", f.obj.reads()-after)
+	}
+	if f.store.Current() != was {
+		t.Error("the generation changed while every poll was refusing")
+	}
+	// And it is stated ONCE. On a thirty-second poll an unchanged refusal
+	// would otherwise be 2,880 identical error lines a day, which is how the
+	// line that matters gets missed.
+	if n := strings.Count(f.log.String(), "not covered by this deployment"); n != 1 {
+		t.Errorf("the same refusal was logged %d times over four polls, want once:\n%s",
+			n, f.log)
+	}
+}
+
+// (Fix round 1, item 1) The cache must not swallow a change. A new object
+// under a new ETag is fetched, whatever was refused before it.
+func TestAChangedETagAfterARefusalIsReadAgain(t *testing.T) {
+	f := newFixture(t, catalogueBytes(t, "get_status"))
+	f.handle.refuse = true
+
+	f.obj.put(catalogueBytes(t, "get_balance"), `"v2"`)
+	if got := f.poller.Once(context.Background()); got != reload.Kept {
+		t.Fatalf("outcome = %v, want Kept", got)
+	}
+	after := f.obj.reads()
+
+	// A different object, and one this deployment can govern.
+	f.handle.refuse = false
+	f.obj.put(catalogueBytes(t, "get_ledger"), `"v3"`)
+	if got := f.poller.Once(context.Background()); got != reload.Swapped {
+		t.Fatalf("outcome = %v after the object changed, want Swapped. Log:\n%s", got, f.log)
+	}
+	if f.obj.reads() <= after {
+		t.Error("a changed object was served out of the refused-object cache")
+	}
+	if now := f.store.Current(); len(now.Defs) != 1 || now.Defs[0].Name != "get_ledger" {
+		t.Errorf("the current generation declares %v, want get_ledger", now.Defs)
+	}
+}
+
+// unreadable is an object that answers its ETag and then refuses to be read,
+// deterministically — the shape of an artifact past the byte ceiling. A real
+// one would be 256 MiB, and building that here would make the suite pay the
+// cost this test exists to stop the DAEMON paying.
+type unreadable struct {
+	etag  string
+	reads int
+}
+
+func (u *unreadable) ETag(context.Context) (string, error) { return u.etag, nil }
+func (u *unreadable) String() string                       { return "s3://garm/huge.binpb" }
+
+func (u *unreadable) Read(context.Context) ([]byte, error) {
+	u.reads++
+	return nil, fmt.Errorf("%s is %w: the ceiling is %d bytes",
+		u, catalogue.ErrTooLarge, catalogue.MaxBytes)
+}
+
+// (Fix round 1, item 2) An object too large to read is a REFUSAL of an
+// artifact, not a store that could not be reached, so it is logged at error
+// and names the generation still serving. And it is deterministic: fetching it
+// again would transfer the ceiling a second time to reach the same sentence,
+// so it is not fetched again until it changes.
+func TestAnObjectTooLargeToReadIsRefusedLoudlyAndNotFetchedAgain(t *testing.T) {
+	f := newFixture(t, catalogueBytes(t, "get_status"))
+	serving := f.store.Current()
+	obj := &unreadable{etag: `"huge"`}
+	f.poller.Source = obj
+
+	for i := 0; i < 3; i++ {
+		if got := f.poller.Once(context.Background()); got != reload.Kept {
+			t.Fatalf("poll %d: outcome = %v, want Kept", i, got)
+		}
+	}
+	if obj.reads != 1 {
+		t.Errorf("the object was read %d times; an object past the ceiling is read "+
+			"once until it changes", obj.reads)
+	}
+	log := f.log.String()
+	if !strings.Contains(log, "level=ERROR") {
+		t.Errorf("an artifact this process refused was logged below error:\n%s", log)
+	}
+	for _, want := range []string{"s3://garm/huge.binpb", serving.Digest} {
+		if !strings.Contains(log, want) {
+			t.Errorf("the refusal does not name %s:\n%s", want, log)
+		}
+	}
+
+	// A new object under a new ETag is read, however large the last one was.
+	obj.etag = `"huge-2"`
+	if got := f.poller.Once(context.Background()); got != reload.Kept {
+		t.Fatalf("outcome = %v, want Kept", got)
+	}
+	if obj.reads != 2 {
+		t.Errorf("a changed object was not read: %d reads", obj.reads)
 	}
 }

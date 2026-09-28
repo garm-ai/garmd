@@ -17,10 +17,11 @@ and serves exactly what that artifact declares. `--catalogue` takes a path or
 an `s3://bucket/key` URL; credentials come from the AWS default chain, and
 `AWS_ENDPOINT_URL` points it at SeaweedFS or MinIO.
 
-Adding a tool is a catalogue rebuild, not a release of this binary. Identity is
-the pair `(binary version, catalogue digest)`, reported at startup, on the
-health endpoint and on every ledger event, so *which tools is this process
-serving* stays exactly answerable.
+Adding a tool is a catalogue rebuild rather than a release of this binary —
+and for an `s3://` catalogue, without a restart either; a file catalogue still
+needs one. Identity is the pair `(binary version, catalogue digest)`, reported
+at startup, on the health endpoint and on every ledger event, so *which tools
+is this process serving* stays exactly answerable.
 
 **An `s3://` catalogue is reloaded without a restart, or refused.**
 `--catalogue-poll` (30s by default, `0` to turn it off) checks the object's
@@ -32,13 +33,18 @@ cache this process opened at startup, and the chain must mount every tool they
 declare. Only then does the new generation become the one being served, and its
 taxonomy reach the verifier in the same operation.
 
-Any refusal leaves the previous generation serving and logs at error naming
-both digests — the one still serving and the one refused. A store that cannot
-be reached is a warning and no swap: a bucket nobody can read is not evidence
-that what is serving is wrong, and withdrawing a working catalogue is the one
-thing to avoid at the moment nobody can replace it. A file catalogue is never
-polled; it is placed by whoever deployed the binary and does not change
-underneath it.
+Any refusal leaves the previous generation serving and logs at error, naming
+the generation still serving and — whenever the bytes got as far as being read
+— the digest refused. A store that cannot be reached is a warning and no swap:
+a bucket nobody can read is not evidence that what is serving is wrong, and
+withdrawing a working catalogue is the one thing to avoid at the moment nobody
+can replace it.
+
+A refused object is reconsidered on every poll, because a refusal can lift
+without the object changing, but it is not fetched again while its ETag is
+unchanged, and the same refusal is restated at most hourly rather than on every
+poll. A file catalogue is never polled; it is placed by whoever deployed the
+binary and does not change underneath it.
 
 A binary reads the current annotation schema and the two previous. Backward is
 generous; forward fails closed at boot rather than loading a policy document it

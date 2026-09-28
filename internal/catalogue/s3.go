@@ -2,6 +2,7 @@ package catalogue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -59,10 +60,21 @@ func (s *S3Source) Read(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("reading %s: %w", s, err)
 	}
 	if len(body) > MaxBytes {
-		return nil, fmt.Errorf("%s is larger than the %d-byte ceiling", s, MaxBytes)
+		return nil, fmt.Errorf("%s is %w: the ceiling is %d bytes", s, ErrTooLarge, MaxBytes)
 	}
 	return body, nil
 }
+
+// ErrTooLarge means the OBJECT was refused, not that the store failed.
+//
+// The difference is the caller's to act on and nobody else's: an object past
+// the ceiling will be refused identically for as long as it sits in the
+// bucket, so a poller must stop fetching it until it changes, while a store
+// that would not answer may answer the next time it is asked and must be
+// retried. Without a sentinel the two are one error string apart, and telling
+// them apart by reading it is how a 256 MiB transfer ends up on a thirty-second
+// loop.
+var ErrTooLarge = errors.New("larger than the catalogue ceiling")
 
 // ETag is the change signal.
 //

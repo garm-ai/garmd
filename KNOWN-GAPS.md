@@ -17,7 +17,23 @@
   and logs at error with the serving digest and the refused one. An unreachable
   store is a warning and no swap: a bucket that cannot be read is not evidence
   that what is serving is wrong. The ETag only says *look again*; the DIGEST
-  decides, so a re-upload of identical bytes is not a new generation.
+  decides, so a re-upload of identical bytes is not a new generation. A refused
+  object is reconsidered every poll — a refusal can lift without the object
+  changing — but it is not fetched again while its ETag is unchanged, and an
+  unchanged refusal is restated hourly rather than every thirty seconds.
+
+**A reload is not cheap in memory, and one shape of it is worth naming.** The
+pre-flight builds the candidate's chain from bytes in hand, `Store.Reload` then
+parses those same bytes a second time into the generation it installs, and the
+chain is built again for that one — so a swap can hold three copies of the
+artifact's descriptors at once, and it forces two collections (the store
+measures the heap around the load). The catalogue that is serving is never one
+of the copies dropped, so this is a peak rather than a leak. Closing it means
+splitting `Store.Reload` into a validate half and an install half so the
+generation that was checked is the generation installed; that is a change to
+`internal/catalogue` and its tests, deferred rather than done here. A refused
+object is also held until it changes or a swap succeeds, so a process serving a
+small catalogue against a bucket holding a large bad one carries both.
 - `internal/transport` — the Invoker and Discoverer ports, with a NATS
   adapter. Invocation, and discovery over `$SRV.INFO`. **Every hop carries
   `Garm-Invocation`**: the caller's assertions — tenant and correlation id,
