@@ -70,6 +70,13 @@ garmd does insist on is that a present `exec` is well formed — an object with 
 non-empty `sub`. A malformed one refuses the token instead of being dropped,
 because the alternative is a record that says a call was direct when it was not.
 
+What reads `Principal.Execution` is the ledger, and only the ledger. Every row
+the chain writes carries it as `execution_subject`, empty for a direct call —
+a column that is always filled distinguishes nothing. It does not cross the
+NATS hop: `Garm-Invocation` carries what the caller asserts, and which process
+executed the call is not something the tool on the far side has any business
+deciding on.
+
 ## What is deliberately not here
 
 - **The annotations and the generator** — [`garm`](https://github.com/garm-ai/garm).

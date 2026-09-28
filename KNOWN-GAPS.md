@@ -105,6 +105,15 @@ small catalogue against a bucket holding a large bad one carries both.
   `claims.go:162-172` for the shape and the refusal, `claims.go:69-70` for it
   not being a hop, `principal.go:206-208` for the copy onto the principal — so
   the two processes agree on what a token means.
+
+  The row records it. `newEvent` copies `Principal.Execution` onto
+  `ledger.Event.ExecutionSubject` (`execution_subject`, field 71, from
+  `garm v0.14.2`) for every outcome the chain decides, so "which of these calls
+  came through a runner" is answerable — and a direct call leaves it empty,
+  which is what makes the column mean anything. The JetStream ledger carries it
+  through `ledger.ToProto`; the stdout recorder prints it in the tool block
+  beside `principal_kind`, because the default deployment has no stream and a
+  field nobody prints is a field nobody can query.
 - **A request folds its token against the generation it is being served by.**
   The surface reads the plane once and pins that chain's compartment registry
   on the request (`authn.WithRegistry`), and step 1 folds against it. A

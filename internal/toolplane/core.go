@@ -737,6 +737,9 @@ func (c *Core) newEvent(p *Principal, procedure string) ledger.Event {
 	ev.ChainDepth = len(p.Chain)
 	ev.ClearanceEffective = p.Clearance.String()
 	ev.CompartmentsEffective = c.reg.Names(p.Compartments)
+	// Empty for a direct call, which is what makes it mean anything: a column
+	// that is always filled distinguishes nothing.
+	ev.ExecutionSubject = p.Execution
 	return ev
 }
 

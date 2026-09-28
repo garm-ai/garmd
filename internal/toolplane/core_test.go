@@ -629,3 +629,43 @@ func TestTheContextOnTheHopCarriesNothingBesideItsAssertions(t *testing.T) {
 		t.Error("the token id crossed the hop inside the encoded context")
 	}
 }
+
+// The row says who executed the call.
+//
+// Without it a governed call that arrived through a runner is indistinguishable
+// in the ledger from one that did not, and the acceptance test's fourth
+// assertion — exec on the governed-door rows and nowhere else — has nothing to
+// read.
+func TestTheLedgerRecordsTheExecutionSubject(t *testing.T) {
+	rec := &record.Memory{}
+	core := testCore(t, rec, okResolver)
+
+	p := testPrincipal(toolv1.Clearance_CLEARANCE_INTERNAL)
+	p.Execution = "runner:agentd"
+	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+
+	events := rec.Events()
+	if len(events) != 1 {
+		t.Fatalf("%d rows, want 1", len(events))
+	}
+	if events[0].ExecutionSubject != "runner:agentd" {
+		t.Errorf("ExecutionSubject = %q, want runner:agentd", events[0].ExecutionSubject)
+	}
+}
+
+// A direct call leaves it empty, which is what makes the field mean anything:
+// a column that is always filled distinguishes nothing.
+func TestADirectCallLeavesTheExecutionSubjectEmpty(t *testing.T) {
+	rec := &record.Memory{}
+	core := testCore(t, rec, okResolver)
+
+	p := testPrincipal(toolv1.Clearance_CLEARANCE_INTERNAL)
+	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got := rec.Events()[0].ExecutionSubject; got != "" {
+		t.Errorf("ExecutionSubject = %q for a direct call", got)
+	}
+}
