@@ -75,9 +75,17 @@ jobs:
       # which is the point: a daemon that can start a broker is a daemon that
       # will, on someone's laptop, in production.
       #
-      # Storage clients are named here for the same reason. A durable audit
-      # store belongs behind a forwarder reading the stream, not inside the
-      # process deciding what a caller may do.
+      # Storage clients are named here because a durable audit store belongs
+      # behind a forwarder reading the stream, not inside the process deciding
+      # what a caller may do.
+      #
+      # The AWS S3 client is deliberately NOT in this list. It is in the build,
+      # and for the one thing the reasoning above does not cover: reading the
+      # catalogue. That is an artifact this process loads at boot and re-reads
+      # on an ETag change, with GetObject and HeadObject and nothing else —
+      # internal/catalogue/s3.go's S3API interface is two read methods wide, so
+      # a change that gave garmd the ability to WRITE to an object store would
+      # have to widen it in a diff someone reads.
       - name: the broker and the storage clients stay out of the build
         run: |
           if go list -deps ./... 2>/dev/null | grep -E 'nats-server|go-duckdb|minio-go'; then

@@ -76,6 +76,18 @@ type Catalogue struct {
 	LoadedAt time.Time
 }
 
+// DigestOf is the identity of an artifact: SHA-256 over the bytes as they were
+// handed over, before anything was parsed.
+//
+// Exported because a REFUSED artifact needs naming too. A reload that will not
+// load has no Catalogue to ask for a digest, and an error line that cannot say
+// which bytes were refused leaves an operator comparing timestamps against a
+// bucket's version history.
+func DigestOf(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // Load parses and validates an artifact. It either returns a usable catalogue
 // or an error; there is no partially-loaded state.
 //
@@ -93,8 +105,7 @@ func Load(body []byte, now func() time.Time) (*Catalogue, error) {
 
 	// Digest first, over the bytes as given. Computing it after parsing would
 	// record what this binary understood rather than what it was handed.
-	sum := sha256.Sum256(body)
-	digest := "sha256:" + hex.EncodeToString(sum[:])
+	digest := DigestOf(body)
 
 	msg := &cataloguev1.Catalogue{}
 	if err := proto.Unmarshal(body, msg); err != nil {
