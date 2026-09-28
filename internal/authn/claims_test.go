@@ -345,3 +345,35 @@ func TestFoldCarriesTheExecutionSubjectAndNarrowsNothing(t *testing.T) {
 			"attribution and must narrow and widen nothing")
 	}
 }
+
+// An exec inside act is not the runner of THIS call: the outermost claims
+// name it, and only they do. A fold that walked the chain for exec would let
+// an inner party's runner overwrite the outer one.
+func TestAnExecNestedInsideActIsNotTheRunner(t *testing.T) {
+	reg, err := policy.NewRegistry(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := authn.ParseClaims(map[string]any{
+		"iss":  "https://sts.test",
+		"sub":  "employee:jdoe",
+		"aud":  "garm",
+		"garm": map[string]any{"clearance": "CLEARANCE_RESTRICTED", "verbs": []any{"READ"}},
+		"exec": map[string]any{"sub": "runner:agentd", "iss": "https://sts.test"},
+		"act": map[string]any{
+			"sub":  "agent:support-assistant",
+			"garm": map[string]any{"clearance": "CLEARANCE_RESTRICTED", "verbs": []any{"READ"}},
+			"exec": map[string]any{"sub": "runner:somebody-else", "iss": "https://other.test"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ParseClaims: %v", err)
+	}
+	p, _, err := authn.Fold(c, reg)
+	if err != nil {
+		t.Fatalf("Fold: %v", err)
+	}
+	if p.Execution != "runner:agentd" {
+		t.Errorf("Execution = %q, want the outermost exec; an inner one took over", p.Execution)
+	}
+}

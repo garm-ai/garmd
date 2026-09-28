@@ -67,6 +67,18 @@ jobs:
           fi
           echo "clean: garmd depends on no tool repository"
 
+      # garmd does not know about agents. An agent's manifest is bytes it
+      # carries unread (see internal/catalogue/agentblind_test.go). Since garm
+      # v0.14 the agent contracts live in the garm module itself, so the
+      # boundary above cannot see them; this one can, tests included.
+      - name: no dependency on the agent contracts
+        run: |
+          if go list -deps -test ./... 2>/dev/null | grep -E 'garm-ai/garm/contracts/garm/agent'; then
+            echo "::error::garmd reaches the agent contracts; it must stay agent-blind" >&2
+            exit 1
+          fi
+          echo "clean: garmd is agent-blind"
+
       # The embedded NATS server is a TEST dependency and must stay one.
       #
       # It is in go.mod because the transport and stream tests run against a
