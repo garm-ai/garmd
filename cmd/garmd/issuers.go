@@ -50,6 +50,10 @@ func trustedIssuers(issuers, jwks []string) ([]authn.TrustedIssuer, error) {
 			// One KeySet per issuer, never shared: a shared one means whoever
 			// can answer that URL may sign for every issuer on the list.
 			KeySet: authn.NewKeySet(authn.KeySetConfig{URL: jwks[i]}),
+			// Carried on the pair, so this index is the LAST one: everything
+			// downstream that has to name the endpoint reads it from here
+			// rather than indexing back into the flag it came from.
+			JWKS: jwks[i],
 		})
 	}
 	return out, nil

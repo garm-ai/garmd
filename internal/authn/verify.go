@@ -51,6 +51,18 @@ type TrustedIssuer struct {
 
 	// KeySet supplies the public keys for THIS issuer, and only this one.
 	KeySet *KeySet
+
+	// JWKS is where KeySet reads those keys from, carried so that a caller
+	// holding the pair does not have to re-derive it by index from the flags
+	// it was built out of. Optional, and never read for verification — a
+	// KeySet already knows its own URL. It is here for the things that have
+	// to NAME the endpoint: the startup line an operator checks the pairing
+	// in, and the issuer-metadata check.
+	//
+	// Two parallel slices indexed in three places is one off-by-one away from
+	// telling an operator that an issuer is verified against a key set that
+	// is not the one it was given.
+	JWKS string
 }
 
 // Config configures a Verifier.
@@ -76,6 +88,11 @@ type Config struct {
 	// Required with it and deliberately not optional: a verifier that accepts
 	// any issuer accepts any IdP that can produce a key under a kid it has
 	// seen.
+	//
+	// One behaviour change: an issuer listed TWICE here used to be harmless,
+	// and is now refused on the first Verify along with the rest of an
+	// unservable list, because after the fold it is two entries claiming the
+	// same name and the second is unreachable.
 	Issuers []string
 
 	// Audience is the `aud` this deployment answers to. Required. A token

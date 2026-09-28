@@ -156,9 +156,14 @@ func checkGrantCeilings(cat *catalogue.Catalogue) error {
 // how they find out from a failed deploy instead of from this line.
 //
 // The other direction matters more. --grant-issuer with nothing to verify
-// against — no --grant-jwks and no --jwks to default to — builds a verifier
-// that refuses every approval with a message about the key set, which reads
-// like an STS fault rather than a flag nobody set.
+// against — no --grant-jwks and no single --jwks to default to — builds a
+// verifier that refuses every approval with a message about the key set, which
+// reads like an STS fault rather than a flag nobody set.
+//
+// And --grant-issuer against a REPEATED --jwks is refused separately, because
+// that one does not refuse anything at runtime: it would verify approvals
+// against whichever key set happened to be written first, which is a hole
+// rather than an outage.
 func checkGrantFlags(o serveOpts) error {
 	if o.grantIssuer == "" {
 		var given []string
@@ -176,9 +181,23 @@ func checkGrantFlags(o serveOpts) error {
 		}
 		return nil
 	}
+	// Distinct from the refusal below, because the operator gave a key set and
+	// the problem is that they gave several. Picking one silently is the
+	// failure that does not look like one: an approval claiming the STS's name
+	// would be verified against whichever --jwks was written first, and the
+	// grant verifier cannot tell — it checks the issuer against its allowlist
+	// and the signature against the key set it was handed, so a first entry
+	// able to answer that URL signs approvals for every issuer on the list.
+	if o.grantJWKS == "" && len(o.jwksURLs) > 1 {
+		return fmt.Errorf("--grant-issuer is set and --jwks is given %d times: a repeated "+
+			"--jwks has no unambiguous default for --grant-jwks, and taking the first "+
+			"would verify approvals against a key set that may not be the grant "+
+			"issuer's. Name it: --grant-jwks <the key set that signs approvals>",
+			len(o.jwksURLs))
+	}
 	if grantJWKS(o) == "" {
 		return fmt.Errorf("--grant-issuer is set and there is no key set to verify its " +
-			"approvals against: give --grant-jwks, or --jwks for it to default to")
+			"approvals against: give --grant-jwks, or a single --jwks for it to default to")
 	}
 	if grantAudience(o) == "" {
 		return fmt.Errorf("--grant-issuer is set and there is no audience an approval " +
@@ -195,15 +214,24 @@ func checkGrantFlags(o serveOpts) error {
 // deployment, and making an operator type the same two values twice is how the
 // two end up disagreeing — at which point every approval is refused with a
 // message about the audience rather than about the configuration.
+//
+// The JWKS default holds only while there is ONE --jwks. An audience is a
+// single value however many issuers there are, so grantAudience has nothing to
+// choose between; a key set does, and choosing wrong is not a refusal.
 func grantJWKS(o serveOpts) string {
 	if o.grantJWKS != "" {
 		return o.grantJWKS
 	}
-	// The FIRST --jwks. With one pair — the ordinary deployment — that is the
-	// only one. With several it is a guess, which is why --grant-jwks exists
-	// and why a deployment with two issuers should set it: approvals come from
-	// the STS, and the STS is rarely the first entry.
-	if len(o.jwksURLs) > 0 {
+	// Exactly one --jwks, or nothing. One is the pair the operator wrote and
+	// there is nothing to guess. Several and the first is a GUESS, and the
+	// wrong guess is not a misconfiguration that refuses: it verifies an
+	// approval claiming the STS's name against the IdP's keys, because the
+	// grant verifier checks the issuer against its own allowlist and the
+	// signature against whatever key set it was handed. That is the
+	// cross-signing hole the token path closes, reopened one flag over — and
+	// approvals come from the STS, which is rarely the first --jwks written.
+	// checkGrantFlags refuses the ambiguity instead.
+	if len(o.jwksURLs) == 1 {
 		return o.jwksURLs[0]
 	}
 	return ""

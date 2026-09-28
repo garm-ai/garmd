@@ -187,11 +187,12 @@ func newServeCmd() *cobra.Command {
 			"is the correct refusal — an approval-gated tool served with no verifier "+
 			"is an approval nobody gave")
 	cmd.Flags().StringVar(&grantJWKSURL, "grant-jwks", "",
-		"JWKS endpoint whose keys sign approval grants. Defaults to the FIRST --jwks, "+
-			"because an STS that issues both tokens and approvals is the ordinary "+
-			"deployment and typing the same URL twice is how the two end up disagreeing. "+
-			"Set it explicitly where --jwks is given more than once: approvals come from "+
-			"the STS, which is rarely the first one written")
+		"JWKS endpoint whose keys sign approval grants. Defaults to --jwks when that is "+
+			"given exactly once, because an STS that issues both tokens and approvals is "+
+			"the ordinary deployment and typing the same URL twice is how the two end up "+
+			"disagreeing. REQUIRED once --jwks is repeated: there is then no unambiguous "+
+			"default, and taking the first would verify approvals against a key set that "+
+			"may not be the grant issuer's")
 	cmd.Flags().StringVar(&grantAudienceName, "grant-audience", "",
 		"Audience an approval grant must name. Defaults to --audience. A grant minted "+
 			"for another deployment is a VALID grant, and this is the only thing that "+
@@ -392,8 +393,8 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	//
 	// Every issuer, not the first: the one that is misconfigured is exactly
 	// the one nobody checked.
-	for i, t := range trusted {
-		if err := authn.CheckIssuerMetadata(cmd.Context(), o.jwksURLs[i], t.Issuer, o.audience); err != nil {
+	for _, t := range trusted {
+		if err := authn.CheckIssuerMetadata(cmd.Context(), t.JWKS, t.Issuer, o.audience); err != nil {
 			return err
 		}
 	}
@@ -439,9 +440,9 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// One line per issuer. An operator reading this is checking that the
 	// process trusts who they think it trusts, and a summary count would hide
 	// exactly the pairing that is wrong.
-	for i, t := range trusted {
+	for _, t := range trusted {
 		fmt.Fprintf(out, "  callers verified against %s (issuer %s, audience %s)\n",
-			o.jwksURLs[i], t.Issuer, o.audience)
+			t.JWKS, t.Issuer, o.audience)
 	}
 	if o.ledgerStream {
 		fmt.Fprintf(out, "  ledger batched to %s, falling back to stdout\n", wire.LedgerStream)
