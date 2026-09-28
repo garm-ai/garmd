@@ -24,6 +24,18 @@ ignores every other extension namespace. Widen it and a catalogue carrying agent
 annotations is refused at boot — agent-awareness acquired through an error
 message.
 
+`internal/catalogue/agentblind_test.go` holds this. It builds a catalogue whose
+service carries a `garm.agent.v1.agent` option — declared in the fixture's own
+proto source, never imported, because importing the type to prove it is not read
+would defeat the point — and asserts that the two annotated methods mount as two
+ordinary tools, that no error names the namespace, and that the annotation's
+bytes survive unread. `internal/serve/agentblind_test.go` carries the same
+fixture through `ListTools`, where an agent-aware garmd would most plausibly
+leak: the two tools come back shaped like every other tool, and no value that
+exists only inside the manifest — prompt digest, step bound, model alias, the
+tools it may call — appears anywhere in the body. Breaking the invariant fails
+there rather than in somebody's acceptance test.
+
 **3. The chain is not configurable.** Ten steps, fixed order. The moment it is a
 slice someone assembles, "is authorization applied?" stops being a structural
 fact. What is pluggable is *how* a step is implemented, never *whether* it runs.
