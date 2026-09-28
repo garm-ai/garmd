@@ -1,0 +1,35 @@
+{
+  "issuer": "https://sts.internal.example.com",
+  "audience": "garm://garmd",
+  "compartments": ["financial", "pii-contact", "support"],
+  "cases": [
+    {
+      "name": "customer C direct via order-assistant: capped by instanceAuthorization, narrowed further by the agent",
+      "mint": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_user": "C",
+        "subject_tenant": "acme",
+        "agent": "order-assistant"
+      },
+      "expect": {
+        "subject": "customer:C",
+        "actor": "agent:order-assistant",
+        "kind": "PRINCIPAL_KIND_USER",
+        "clearance": "CLEARANCE_PUBLIC",
+        "compartments": [],
+        "verbs": ["VERB_READ"],
+        "toolSets": ["self-service"]
+      }
+    },
+    {
+      "name": "customer Z: refused, no can_invoke tuple names this customer for this agent",
+      "mint": {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_user": "Z",
+        "subject_tenant": "acme",
+        "agent": "order-assistant"
+      },
+      "mintError": true
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "issuer": "https://garmdev.invalid/idp",
+  "audience": "garm",
+  "compartments": ["financial", "pii-contact", "support"],
+  "cases": [
+    {
+      "name": "alice direct: two roles UNION",
+      "mint": {"user": "alice"},
+      "expect": {
+        "subject": "user:alice",
+        "actor": "",
+        "kind": "PRINCIPAL_KIND_USER",
+        "clearance": "CLEARANCE_RESTRICTED",
+        "compartments": ["financial", "pii-contact"],
+        "verbs": ["VERB_READ", "VERB_WRITE"]
+      }
+    },
+    {
+      "name": "bob direct: one role",
+      "mint": {"user": "bob"},
+      "expect": {
+        "subject": "user:bob",
+        "actor": "",
+        "kind": "PRINCIPAL_KIND_USER",
+        "clearance": "CLEARANCE_INTERNAL",
+        "compartments": ["pii-contact"],
+        "verbs": ["VERB_READ"]
+      }
+    },
+    {
+      "name": "bob via triage-bot: same authority, actor recorded",
+      "mint": {"user": "bob", "as": "triage-bot"},
+      "expect": {
+        "subject": "user:bob",
+        "actor": "agent:triage-bot",
+        "kind": "PRINCIPAL_KIND_USER",
+        "clearance": "CLEARANCE_INTERNAL",
+        "compartments": ["pii-contact"],
+        "verbs": ["VERB_READ"]
+      }
+    },
+    {
+      "name": "alice via auditor-bot: delegation narrows on all three axes",
+      "mint": {"user": "alice", "as": "auditor-bot"},
+      "expect": {
+        "subject": "user:alice",
+        "actor": "agent:auditor-bot",
+        "kind": "PRINCIPAL_KIND_USER",
+        "clearance": "CLEARANCE_PUBLIC",
+        "compartments": [],
+        "verbs": ["VERB_READ"]
+      }
+    },
+    {
+      "name": "alice via triage-bot: refused, may_act_for names only bob",
+      "mint": {"user": "alice", "as": "triage-bot"},
+      "mintError": true
+    }
+  ]
+}

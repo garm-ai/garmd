@@ -27,7 +27,7 @@ import (
 
 type stubGrants struct{}
 
-func (stubGrants) Verify(context.Context, *Principal, ToolDef) error { return nil }
+func (stubGrants) Verify(context.Context, *Principal, ToolDef, proto.Message) error { return nil }
 
 type stubFGA struct{}
 

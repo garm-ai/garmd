@@ -113,7 +113,17 @@ type FGAChecker interface {
 // a pair: relaxing that refusal without making this seam mandatory for those
 // tools would serve an approval-gated tool with no approval.
 type GrantVerifier interface {
-	Verify(ctx context.Context, p *Principal, t ToolDef) error
+	// Verify checks that a human approved THIS call.
+	//
+	// req is here because a grant binds to the values a person actually saw —
+	// the tool's material_fields. A verifier that only saw the tool could
+	// answer "somebody approved this tool recently", which inside a
+	// fifteen-minute window authorises any call to it.
+	//
+	// The error is returned to the caller's surface rather than flattened to
+	// a denial, so a missing grant can say what to go and get while a wrong
+	// one says nothing.
+	Verify(ctx context.Context, p *Principal, t ToolDef, req proto.Message) error
 }
 
 // Notifier is step 10: HOTL fan-out, after the response has left. It
@@ -569,7 +579,7 @@ func (c *Core) invoke(
 	if err := c.fgaPre(ctx, p, tool, req, &ev); err != nil {
 		return nil, err
 	}
-	if err := c.verifyGrant(ctx, p, tool, &ev); err != nil {
+	if err := c.verifyGrant(ctx, p, tool, req, &ev); err != nil {
 		return nil, err
 	}
 	if known {
@@ -810,14 +820,21 @@ func (c *Core) fgaPre(
 // only because mount refuses to serve a MODE_GRANT tool at all. Nil is "not
 // declared", never "checked and shrugged".
 func (c *Core) verifyGrant(
-	ctx context.Context, p *Principal, tool ToolDef, ev *ledger.Event,
+	ctx context.Context, p *Principal, tool ToolDef, req proto.Message, ev *ledger.Event,
 ) error {
 	if c.grants == nil {
 		return nil
 	}
-	if err := c.grants.Verify(ctx, p, tool); err != nil {
+	// The REQUEST goes to the verifier, because a grant binds to the values a
+	// human saw. Without it an approval covers the tool for a window rather
+	// than the call, and fifteen minutes of authority to call initiate_payment
+	// is not what anybody clicking approve believes they are giving.
+	if err := c.grants.Verify(ctx, p, tool, req); err != nil {
 		ev.ErrorDetail = "grant verification refused: " + err.Error()
-		return errPermissionDenied
+		// Passed through rather than flattened. A missing grant and a wrong
+		// one are different things to a caller: the first has a next move and
+		// the second does not, and the surface needs to tell them apart.
+		return err
 	}
 	return nil
 }
