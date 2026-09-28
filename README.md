@@ -13,7 +13,10 @@ Named for the hound that guards the gate in Norse myth, which is what this does.
 
 A garmd build does not know which tools exist. It loads a **catalogue
 artifact** — a descriptor set plus the annotations that govern it — at startup,
-and serves exactly what that artifact declares.
+and serves exactly what that artifact declares. A file on disk and an object
+in an S3-compatible store are both implemented as a source for that artifact,
+though `--catalogue` cannot yet take an `s3://` URL — that flag wiring is a
+later task.
 
 Adding a tool is a catalogue rebuild and a restart, not a release of this
 binary. Identity is the pair `(binary version, catalogue digest)`, reported at

@@ -58,6 +58,9 @@ func (s *S3Source) Read(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", s, err)
 	}
+	if len(body) > MaxBytes {
+		return nil, fmt.Errorf("%s is larger than the %d-byte ceiling", s, MaxBytes)
+	}
 	return body, nil
 }
 
@@ -76,7 +79,15 @@ func (s *S3Source) ETag(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("checking %s: %w", s, err)
 	}
-	return aws.ToString(out.ETag), nil
+	etag := aws.ToString(out.ETag)
+	if etag == "" {
+		// A poller compares this generation's ETag with the last one it saw,
+		// and "" equal to "" never differs — a store that omits the header
+		// would look indistinguishable from an object that never changes.
+		// Refused rather than trusted as "unchanged".
+		return "", fmt.Errorf("checking %s: cannot signal change: no ETag", s)
+	}
+	return etag, nil
 }
 
 func (s *S3Source) String() string { return fmt.Sprintf("s3://%s/%s", s.Bucket, s.Key) }
@@ -93,7 +104,10 @@ func ParseS3URL(raw string) (bucket, key string, ok bool) {
 		return "", "", false
 	}
 	bucket, key, found = strings.Cut(rest, "/")
-	if !found || bucket == "" || key == "" {
+	// A leading slash in what follows the bucket is an empty first key
+	// segment — "s3://garm//catalogue.binpb" — which is a malformed flag,
+	// not a key that happens to start with a slash.
+	if !found || bucket == "" || key == "" || strings.HasPrefix(key, "/") {
 		return "", "", false
 	}
 	return bucket, key, true
@@ -111,11 +125,19 @@ const EndpointEnv = "AWS_ENDPOINT_URL"
 //
 // AWS_ENDPOINT_URL points it at SeaweedFS or MinIO, and forces path-style
 // addressing when it does: a local endpoint is an address rather than a name,
-// and a virtual-host request would resolve bucket.127.0.0.1. It also sets
-// RequestChecksumCalculationWhenRequired, matching `garm catalogue publish`
-// on the other side of this store: SeaweedFS and MinIO reject the CRC32
-// trailer the SDK's newer default attaches to every request, so both sides
-// of the same local store have to agree not to send one.
+// and a virtual-host request would resolve bucket.127.0.0.1.
+//
+// It also sets RequestChecksumCalculationWhenRequired, for symmetry with
+// `garm catalogue publish` on the other side of this store, which needs that
+// setting because SeaweedFS and MinIO reject the CRC32 trailer the SDK's
+// newer default attaches to a PutObject. It is inert here — GetObject and
+// HeadObject never attach a request checksum regardless of this setting —
+// so this line changes nothing this package does; it is set so that anyone
+// pointing this client at a write path later inherits the same answer rather
+// than rediscovering it. The read-side knob to watch instead is
+// ResponseChecksumValidation, which governs whether THIS client verifies a
+// checksum on what it receives; worth a look at the Task 10 smoke test
+// against the real store.
 func NewS3Client(ctx context.Context) (*s3.Client, error) {
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRequestChecksumCalculation(aws.RequestChecksumCalculationWhenRequired),

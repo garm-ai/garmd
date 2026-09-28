@@ -45,6 +45,11 @@ func newFakeS3(t *testing.T, body []byte, etag string) (*fakeS3, *s3.Client) {
 		// host anything answers on.
 		UsePathStyle: true,
 		Credentials:  credentials.NewStaticCredentialsProvider("test", "test", ""),
+		// The failure test deliberately makes every request fail; without
+		// this the SDK's default retry policy spends several seconds
+		// retrying a 500 from a store that was never going to answer
+		// differently.
+		Retryer: aws.NopRetryer{},
 	})
 }
 
@@ -59,7 +64,9 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	w.Header().Set("ETag", f.etag)
+	if f.etag != "" {
+		w.Header().Set("ETag", f.etag)
+	}
 	switch r.Method {
 	case http.MethodHead:
 		f.head++
@@ -105,6 +112,26 @@ func TestAnObjectIsReadFromItsBucketAndKey(t *testing.T) {
 	}
 }
 
+// A bucket somebody can write is not a bucket that only ever holds what was
+// meant to be there, so Read enforces the same ceiling Load does — refusing
+// an oversized object here, with a sentence naming it, rather than handing
+// MaxBytes+1 bytes to Load to refuse a second time.
+func TestReadRefusesAnObjectOverTheCeiling(t *testing.T) {
+	body := make([]byte, catalogue.MaxBytes+1)
+	fake, client := newFakeS3(t, body, `"abc"`)
+
+	_, err := source(client).Read(context.Background())
+	if err == nil {
+		t.Fatal("Read accepted an object one byte over the ceiling")
+	}
+	if !strings.Contains(err.Error(), "s3://garm/catalogue/catalogue.binpb") {
+		t.Errorf("the error does not name the object: %v", err)
+	}
+	if fake.gets != 1 {
+		t.Errorf("%d GETs, want 1", fake.gets)
+	}
+}
+
 // The ETag is the change signal, and it is OPAQUE: quoted by S3, sometimes
 // unquoted elsewhere, a multipart suffix on a large object. Nothing here
 // interprets it — a poller compares it with the last one, and that is all it
@@ -130,6 +157,24 @@ func TestTheETagComesBackFromAHeadWithoutReadingTheObject(t *testing.T) {
 	fake.set([]byte("a new artifact"), `"def"`)
 	if got, err := source(client).ETag(context.Background()); err != nil || got != `"def"` {
 		t.Errorf("ETag after a change = %q, %v; want \"def\"", got, err)
+	}
+}
+
+// A poller compares this generation's ETag with the last one it saw, and ""
+// compared to "" never differs: a store that omits the header would look
+// like an object that never changes. That is refused rather than trusted.
+func TestAnAbsentETagIsAnError(t *testing.T) {
+	_, client := newFakeS3(t, []byte("the artifact"), "")
+
+	_, err := source(client).ETag(context.Background())
+	if err == nil {
+		t.Fatal("a HEAD with no ETag header reported a successful ETag")
+	}
+	if !strings.Contains(err.Error(), "s3://garm/catalogue/catalogue.binpb") {
+		t.Errorf("the error does not name the object: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cannot signal change") {
+		t.Errorf("the error does not say why an empty ETag is refused: %v", err)
 	}
 }
 
@@ -169,6 +214,7 @@ func TestParseS3URL(t *testing.T) {
 		{"s3://garm/catalogue/catalogue.binpb", "garm", "catalogue/catalogue.binpb", true},
 		{"s3://garm", "", "", false},
 		{"s3://garm/", "", "", false},
+		{"s3://garm//catalogue.binpb", "", "", false},
 		{"s3:///key", "", "", false},
 		{"s3://", "", "", false},
 		{"/var/lib/garm/catalogue.binpb", "", "", false},

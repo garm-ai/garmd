@@ -6,7 +6,9 @@
   --catalogue` reports `(version, digest)`, what the catalogue costs, and
   lists what it serves. A byte ceiling guards pathological input;
   `--max-tools` is an opt-in budget for catching a deployment pointed at the
-  wrong catalogue.
+  wrong catalogue. An `S3Source` reading `catalogue.binpb` from an
+  S3-compatible store also exists, but `--catalogue` cannot yet take an
+  `s3://` URL — that wiring is a later task.
 - `internal/transport` — the Invoker and Discoverer ports, with a NATS
   adapter. Invocation, and discovery over `$SRV.INFO`. **Every hop carries
   `Garm-Invocation`**: the caller's assertions — tenant and correlation id,
