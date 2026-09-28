@@ -6,9 +6,18 @@
   --catalogue` reports `(version, digest)`, what the catalogue costs, and
   lists what it serves. A byte ceiling guards pathological input;
   `--max-tools` is an opt-in budget for catching a deployment pointed at the
-  wrong catalogue. An `S3Source` reading `catalogue.binpb` from an
-  S3-compatible store also exists, but `--catalogue` cannot yet take an
-  `s3://` URL — that wiring is a later task.
+  wrong catalogue.
+- **An `s3://` catalogue, with a safe reload.** `--catalogue s3://bucket/key`
+  loads from an S3-compatible store, and `--catalogue-poll` (default 30s)
+  checks its ETag. A change is pre-flighted before anything swaps: the bytes
+  are read once, loaded, their compartment declarations built into a registry,
+  their approval ceilings checked against the replay cache this process
+  actually holds, and the chain built for them — and only then does the store
+  take them. Any refusal at any of those leaves the previous generation serving
+  and logs at error with the serving digest and the refused one. An unreachable
+  store is a warning and no swap: a bucket that cannot be read is not evidence
+  that what is serving is wrong. The ETag only says *look again*; the DIGEST
+  decides, so a re-upload of identical bytes is not a new generation.
 - `internal/transport` — the Invoker and Discoverer ports, with a NATS
   adapter. Invocation, and discovery over `$SRV.INFO`. **Every hop carries
   `Garm-Invocation`**: the caller's assertions — tenant and correlation id,
@@ -59,10 +68,12 @@
   whole token.
 
   `authn.Swappable` also holds a taxonomy behind an atomic pointer, for a
-  verifier with no plane behind it, and the daemon passes one. Nothing calls
-  `Set` yet — wiring a successful reload to it is a later task, so today it
-  serves the boot generation for the life of the process, and a Config naming
-  both a registry and a source is refused rather than resolved.
+  verifier with no plane behind it, and the daemon passes one. A successful
+  reload calls `Set`, in the same operation as the swap and after it: the chain
+  for the generation now current is published first, then its taxonomy, so the
+  two are never left disagreeing for longer than those two lines — and a
+  generation that was refused leaves the old taxonomy exactly where it was. A
+  Config naming both a registry and a source is refused rather than resolved.
 - `internal/record` — where an event goes. Its SHAPE is in the contract,
   because a tool call and a generation call must produce one record type.
 - `internal/record/jetstream` — the ledger, batched onto `GARM_LEDGER`.
@@ -115,15 +126,22 @@ issuer minted, which the tool's author cannot cap and the cache cannot be sized
 to outlast — so the grant would be replayable after its spent-record expired.
 The refusal names the tool.
 
-*The bucket's expiry is derived once, at startup, from the boot catalogue.* A
-reload (Task 10) that lengthens a ceiling, or that introduces the first gated
-tool into a process started without one, does not re-derive or re-check it: the
-bucket keeps the expiry it was created with until a restart, and a grant longer
-than that expiry is replayable in the gap. The same shape as the verifier's
-compartment taxonomy, which is boot-derived too until Task 10 calls
-`authn.Swappable.Set` — with the difference that a request already folds
-against the generation SERVING it rather than against that boot value, and
-nothing equivalent rescues this bucket.
+*The bucket's expiry is still derived once, at startup, from the boot
+catalogue, and a reload does not re-derive it.* A JetStream bucket's TTL is a
+property of the bucket, which this deployment does not own alone, so widening
+it under a running process is not garmd's to do. What the reload does instead
+is REFUSE: a generation whose longest `max_grant_age` plus the skew exceeds the
+retention the bucket actually reports keeps the previous generation serving,
+with the reason logged, and the operator restarts — which is the one action
+that does re-derive the bucket. That turns a silent replay window into a
+refusal, and it is a real limitation rather than a closed gap: a catalogue
+lengthening a ceiling cannot be rolled out to a running process by reload
+alone.
+
+The floor case is the same shape. A process started against a catalogue with no
+gated tool opened its bucket at `bucketFloorTTL`, one hour, so a reload that
+introduces the first gated tool is admitted only while that tool's ceiling plus
+the skew fits inside the hour, and refused otherwise.
 
 A presented approval that is not good for this call — wrong tool, wrong
 subject, too old, already spent, material that differs from what was approved —

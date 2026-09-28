@@ -166,7 +166,7 @@ func TestTwoIssuersWithoutAGrantIssuerStillStart(t *testing.T) {
 	if err := checkGrantFlags(o); err != nil {
 		t.Fatalf("a two-issuer deployment with no --grant-issuer was refused: %v", err)
 	}
-	v, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), o)
+	v, _, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), o)
 	if err != nil {
 		t.Fatalf("grantVerifier: %v", err)
 	}

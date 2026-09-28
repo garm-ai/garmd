@@ -68,8 +68,42 @@ func (h *Handler) planeFor(cat *catalogue.Catalogue) (*plane, error) {
 	if err != nil {
 		return nil, err
 	}
-	h.plane.Store(p)
+	// Published only if it is not OLDER than what is already there.
+	//
+	// Two requests can straddle a reload: one that read the previous
+	// generation reaches this line after the reload has published the new
+	// one, and an unconditional store would put the outgoing chain back.
+	// Every request after that would rebuild — compiling every plan in the
+	// artifact — and the pair would flip for as long as stragglers kept
+	// arriving.
+	//
+	// Ordered by LoadedAt, which is the only ordering a generation carries: a
+	// digest is a content hash and says nothing about which came first. The
+	// store is not consulted, deliberately — reading Current() here would be a
+	// second read of the catalogue inside a request that has already taken
+	// one, which is the one thing the immutable-generation design forbids.
+	// Equal timestamps (a fixture, an injected clock) fall through to the
+	// later builder, which is what this did before there was a rule at all.
+	if cur := h.plane.Load(); cur == nil || !p.cat.LoadedAt.Before(cur.cat.LoadedAt) {
+		h.plane.Store(p)
+	}
 	return p, nil
+}
+
+// Check builds the chain for a generation and throws it away.
+//
+// The pre-flight half of a reload: it answers "could this deployment govern
+// that artifact" about a candidate nothing is serving yet, which is a question
+// that has to be settled BEFORE the store swaps, because a Store has no way to
+// put a generation back.
+//
+// It does not publish, and that is the whole difference from Prepare. A
+// candidate's chain in the cache would be a chain for a generation no request
+// can read — every request arriving before the swap would find it, miss, and
+// rebuild the outgoing one.
+func (h *Handler) Check(cat *catalogue.Catalogue) error {
+	_, err := h.newPlane(cat)
+	return err
 }
 
 // Prepare builds the chain for a generation up front, so a catalogue this
@@ -81,6 +115,10 @@ func (h *Handler) planeFor(cat *catalogue.Catalogue) (*plane, error) {
 // caller. A tool declaring supervision nobody will apply is exactly what
 // AddTools refuses, and the refusal is worth nothing if it arrives one
 // request at a time after the deploy is green.
+//
+// It PUBLISHES the chain it builds, so it is for the generation that is
+// current: at boot, and at the moment a reload has made one current. The
+// pre-flight of a candidate is Check, below.
 func (h *Handler) Prepare(cat *catalogue.Catalogue) error {
 	_, err := h.planeFor(cat)
 	return err

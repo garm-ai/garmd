@@ -29,21 +29,21 @@ import (
 // trust, and there is no sensible default for who signs a human's approval.
 func grantVerifier(
 	ctx context.Context, nc *nats.Conn, cat *catalogue.Catalogue, o serveOpts,
-) (toolplane.GrantVerifier, error) {
+) (toolplane.GrantVerifier, func(*catalogue.Catalogue) error, error) {
 	// Before the early return, so two of the three flags given without the
 	// third is an error rather than a value that does nothing.
 	if err := checkGrantFlags(o); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if o.grantIssuer == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Before the bucket, because this is the check that makes the bucket's
 	// size mean anything: a gated tool with no ceiling has no age this plane
 	// can enforce and no number the cache can be sized from.
 	if err := checkGrantCeilings(cat); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// The cache must outlast the longest approval the catalogue declares, and
@@ -54,8 +54,8 @@ func grantVerifier(
 	// nil connection rather than returning an error, so without this a
 	// misordered construction is a panic at startup instead of a sentence.
 	if nc == nil {
-		return nil, fmt.Errorf("--grant-issuer is set and there is no NATS connection "+
-			"to hold the %s replay cache", replay.BucketName)
+		return nil, nil, fmt.Errorf("--grant-issuer is set and there is no NATS "+
+			"connection to hold the %s replay cache", replay.BucketName)
 	}
 
 	// The bucket must outlast the oldest approval the verifier will still
@@ -75,7 +75,7 @@ func grantVerifier(
 	}
 	spent, err := replay.NewJetStream(ctx, nc, ttl)
 	if err != nil {
-		return nil, fmt.Errorf("the replay cache for spent grants (%s): %w",
+		return nil, nil, fmt.Errorf("the replay cache for spent grants (%s): %w",
 			replay.BucketName, err)
 	}
 	// Against what the bucket ACTUALLY keeps, which an older deployment may
@@ -84,7 +84,7 @@ func grantVerifier(
 	// replayable in the gap, and nothing about that is visible at the moment
 	// it is configured.
 	if err := replay.CheckRetention(spent, covers); err != nil {
-		return nil, fmt.Errorf("this deployment cannot verify grants: %w", err)
+		return nil, nil, fmt.Errorf("this deployment cannot verify grants: %w", err)
 	}
 
 	return &grants.Verifier{
@@ -98,7 +98,43 @@ func grantVerifier(
 		// still accepted, and the caller has nothing in either refusal to tell
 		// them the clocks are what disagreed.
 		Skew: authn.DefaultSkew,
-	}, nil
+	}, reloadGuard(spent), nil
+}
+
+// reloadGuard is the question a reload has to ask that the mount check cannot.
+//
+// The replay bucket's expiry is derived ONCE, at startup, from the boot
+// catalogue's longest ceiling — a JetStream bucket's TTL is a property of the
+// bucket and this process is not the only one using it, so a reload cannot
+// simply widen it. A generation that raises the ceiling past what the bucket
+// keeps mounts perfectly happily: nothing in the chain knows about the cache's
+// retention, so the failure would be an approval still valid after its
+// spent-record had expired, replayable in the gap, with nothing to see.
+//
+// So the reload refuses it, and the operator restarts — which is the one
+// action that DOES re-derive the bucket. That is a real limitation stated as a
+// refusal rather than left as a hole; see KNOWN-GAPS.md.
+//
+// It is built against the cache the verifier actually got, whose retention was
+// read back from the bucket rather than assumed from what this process asked
+// for: an older deployment may have created it with a different expiry.
+func reloadGuard(spent replay.Cache) func(*catalogue.Catalogue) error {
+	return func(next *catalogue.Catalogue) error {
+		// The same refusal startup makes, for the same reason: a gated tool
+		// with no ceiling has no age to enforce and no number to size a cache
+		// from. Arriving by reload does not make it acceptable.
+		if err := checkGrantCeilings(next); err != nil {
+			return err
+		}
+		longest := longestGrantAge(next)
+		if longest <= 0 {
+			return nil
+		}
+		// The same margin the bucket was sized with: the verifier accepts an
+		// approval up to Skew past its ceiling, so the record of it being
+		// spent has to survive that long too.
+		return replay.CheckRetention(spent, longest+authn.DefaultSkew)
+	}
 }
 
 // bucketFloorTTL is the expiry given to the replay bucket when the catalogue
@@ -110,10 +146,14 @@ func grantVerifier(
 // a grant at all, and it exists because a JetStream bucket cannot be created
 // without an expiry.
 //
-// Generous rather than minimal, and deliberately: the one way it can ever
-// bound a real approval is a reload (Task 10) that introduces the first gated
-// tool into a process started without one, which does not re-derive the
-// bucket. See KNOWN-GAPS.md.
+// Generous rather than minimal, and deliberately: the one way it can ever meet
+// a real approval is a reload that introduces the first gated tool into a
+// process started without one, and a reload does not re-derive the bucket.
+// reloadGuard is what keeps that honest — a generation whose ceiling does not
+// fit inside this hour is refused rather than served against a cache that
+// would forget first. An hour is enough for the ordinary approval, so the
+// refusal is rare and the restart that lifts it is a real one. See
+// KNOWN-GAPS.md.
 const bucketFloorTTL = time.Hour
 
 // checkGrantCeilings refuses a MODE_GRANT tool that declares no

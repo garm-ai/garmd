@@ -31,6 +31,7 @@ import (
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/record"
 	recordjs "github.com/garm-ai/garmd/internal/record/jetstream"
+	"github.com/garm-ai/garmd/internal/reload"
 	"github.com/garm-ai/garmd/internal/serve"
 	garmnats "github.com/garm-ai/garmd/internal/transport/nats"
 )
@@ -103,6 +104,7 @@ func bytesHuman(n int64) string {
 
 func newServeCmd() *cobra.Command {
 	var cataloguePath, natsURL, listen string
+	var cataloguePoll time.Duration
 	var audience, hashKeyFile string
 	var jwksURLs, issuers []string
 	var grantIssuer, grantJWKSURL, grantAudienceName string
@@ -115,14 +117,16 @@ func newServeCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runServe(cmd, serveOpts{
-				catalogue: cataloguePath,
-				natsURL:   natsURL,
-				listen:    listen,
-				maxTools:  maxTools,
-				jwksURLs:  jwksURLs,
-				issuers:   issuers,
-				audience:  audience,
-				hashKey:   hashKeyFile,
+				catalogue:     cataloguePath,
+				cataloguePoll: cataloguePoll,
+
+				natsURL:  natsURL,
+				listen:   listen,
+				maxTools: maxTools,
+				jwksURLs: jwksURLs,
+				issuers:  issuers,
+				audience: audience,
+				hashKey:  hashKeyFile,
 
 				grantIssuer:   grantIssuer,
 				grantJWKS:     grantJWKSURL,
@@ -140,7 +144,16 @@ func newServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&cataloguePath, "catalogue", "",
-		"Path to the catalogue artifact this process serves")
+		"The catalogue artifact this process serves: a path, or s3://bucket/key for "+
+			"an object store. An object is re-read when it changes, a file is not — "+
+			"a file is placed by whoever deployed this binary and does not change "+
+			"underneath it")
+	cmd.Flags().DurationVar(&cataloguePoll, "catalogue-poll", 30*time.Second,
+		"How often to check an s3:// catalogue for a change, by ETag. Ignored for a "+
+			"file, and 0 turns it off — this process then serves the generation it "+
+			"booted with until a restart. Matches the reconciler's cadence: there is "+
+			"no notification, and a shorter interval only asks the object store more "+
+			"often")
 	cmd.Flags().StringVar(&natsURL, "nats", nats.DefaultURL,
 		"NATS server the tool services are reachable on")
 	cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:7440",
@@ -202,9 +215,13 @@ func newServeCmd() *cobra.Command {
 
 type serveOpts struct {
 	catalogue string
-	natsURL   string
-	listen    string
-	maxTools  int
+	// cataloguePoll is how often an s3:// catalogue's ETag is checked. It
+	// does nothing for a file.
+	cataloguePoll time.Duration
+
+	natsURL  string
+	listen   string
+	maxTools int
 	// Paired by position: jwksURLs[i] is the key set for issuers[i]. Two
 	// slices rather than one slice of pairs because they arrive as two flags,
 	// and trustedIssuers is the single place that turns them into pairs.
@@ -251,8 +268,17 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 		return err
 	}
 
+	// A path or an object, decided once. The object is returned twice over —
+	// the same value boots this process and is the one the poller watches —
+	// because two constructions could disagree about the key, and a process
+	// serving one artifact while polling another would reload on a change to a
+	// document it is not serving.
+	src, object, err := catalogueSource(cmd.Context(), path)
+	if err != nil {
+		return err
+	}
 	store := catalogue.NewStore(catalogue.Options{MaxTools: maxTools})
-	cat, err := store.Reload(cmd.Context(), catalogue.FileSource{Path: path})
+	cat, err := store.Reload(cmd.Context(), src)
 	if err != nil {
 		return err
 	}
@@ -308,7 +334,7 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// that forgets faster than the catalogue's longest approval, is a
 	// misconfiguration that must stop this process rather than be discovered
 	// by whoever replays a grant.
-	grantsFor, err := grantVerifier(cmd.Context(), nc, cat, o)
+	grantsFor, coversGrants, err := grantVerifier(cmd.Context(), nc, cat, o)
 	if err != nil {
 		return err
 	}
@@ -330,9 +356,9 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// silently is how a typo becomes an unexplained denial nobody can trace.
 	//
 	// Built from the boot catalogue and held behind a swappable pointer, so
-	// the taxonomy CAN be replaced without a restart. Nothing calls Set yet:
-	// wiring a successful reload to it is a later task, and until then this
-	// serves the boot generation for the life of the process.
+	// the taxonomy is replaced without a restart: the poller below calls Set
+	// in the same operation as the swap, and only on a generation that became
+	// current.
 	//
 	// What already follows the catalogue is the taxonomy each REQUEST folds
 	// against: the surface pins the current plane's registry on the request
@@ -423,6 +449,28 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go rec.Run(ctx)
+
+	// Only for an object store, and only with an interval. A file catalogue is
+	// placed by whoever deployed this binary and does not change underneath
+	// it; --catalogue-poll at zero is an operator saying they want the
+	// generation this process booted with and no other.
+	if object != nil && o.cataloguePoll > 0 {
+		poller := &reload.Poller{
+			Source: object,
+			Store:  store,
+			// The same handler and the same swappable taxonomy the surface
+			// reads, so a swap replaces the chain and the taxonomy together.
+			Handler:      h,
+			Compartments: compartments,
+			// Nil unless step 5 is configured, and nil is right: with no
+			// verifier a MODE_GRANT generation is refused by the mount check
+			// anyway, and there is no bucket for a ceiling to outlast.
+			Admit:    coversGrants,
+			Log:      log,
+			Interval: o.cataloguePoll,
+		}
+		go poller.Run(ctx)
+	}
 	// Closed once every in-flight call has finished. The buffered ledger is
 	// flushed AFTER that, because a call still running is a row not yet
 	// recorded, and flushing first would drop precisely the rows the
@@ -448,6 +496,23 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 		fmt.Fprintf(out, "  ledger batched to %s, falling back to stdout\n", wire.LedgerStream)
 	} else {
 		fmt.Fprintf(out, "  ledger to stdout only; a log rotation deletes it\n")
+	}
+	// Said here, with the rest of what this process will do while it runs,
+	// because it is the one line that tells an operator the catalogue can
+	// change without them: what it refuses matters more than the interval.
+	switch {
+	case object != nil && o.cataloguePoll > 0:
+		fmt.Fprintf(out, "  catalogue polled at %s every %s; a generation this "+
+			"deployment cannot govern, or whose approvals would outlive the replay "+
+			"cache, is refused and the current one keeps serving\n",
+			object, o.cataloguePoll)
+	case object != nil:
+		fmt.Fprintf(out, "  catalogue read once from %s and NOT polled "+
+			"(--catalogue-poll %s); a changed object is picked up at the next "+
+			"restart\n", object, o.cataloguePoll)
+	default:
+		fmt.Fprintf(out, "  catalogue read once from %s; a file does not change "+
+			"under a running process, and nothing here watches it\n", src)
 	}
 	if auditSink != nil {
 		fmt.Fprintf(out, "  audit stream %s, retention asserted as %s\n",

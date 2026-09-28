@@ -70,8 +70,11 @@ func registryFrom(ctx context.Context) *policy.Registry {
 // and the write is on a reload: a lock here would put every verification behind
 // the same word, for a value that changes twice a day.
 //
-// Nothing drives Set yet. The reload path that will call it is a later task;
-// this holds one generation and serves it until then.
+// internal/reload drives Set, on a generation that became current and never on
+// one that was refused. It is the FALLBACK taxonomy: a request served through
+// the surface folds against the registry of the plane serving it, pinned with
+// WithRegistry, which is what keeps a fold and the chain that judges it on the
+// same generation even across a swap.
 type Swappable struct {
 	p atomic.Pointer[policy.Registry]
 }

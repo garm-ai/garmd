@@ -34,7 +34,7 @@ import (
 // approval-gated tool against a verifier that panics on the first call. Same
 // trap, same shape, as the audit Sink in records_test.go.
 func TestWithNoGrantIssuerThereIsNoVerifierAtAll(t *testing.T) {
-	v, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), serveOpts{})
+	v, _, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), serveOpts{})
 	if err != nil {
 		t.Fatalf("grantVerifier: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestWithNoGrantIssuerThereIsNoVerifierAtAll(t *testing.T) {
 // every call, which is safe and useless.
 func TestTheGrantIssuerFlagBuildsAUsableVerifier(t *testing.T) {
 	nc := jetstreamConn(t)
-	v, err := grantVerifier(context.Background(), nc, gatedCatalogue(t), serveOpts{
+	v, _, err := grantVerifier(context.Background(), nc, gatedCatalogue(t), serveOpts{
 		jwksURLs:    []string{"https://idp.test/jwks.json"},
 		audience:    "garm",
 		grantIssuer: "https://sts.test",
@@ -185,7 +185,7 @@ func TestAGatedToolWithNoCeilingRefusesToStart(t *testing.T) {
 		ApprovalMode: toolv1.Approval_MODE_GRANT,
 	})
 
-	_, err := grantVerifier(context.Background(), nil, cat, serveOpts{
+	_, _, err := grantVerifier(context.Background(), nil, cat, serveOpts{
 		jwksURLs: []string{"https://idp.test/jwks.json"}, audience: "garm",
 		grantIssuer: "https://sts.test",
 	})
@@ -212,7 +212,7 @@ func TestTheBucketIsSizedByTheLongestCeiling(t *testing.T) {
 		MaxGrantAge:  2 * time.Hour,
 	})
 
-	v, err := grantVerifier(context.Background(), jetstreamConn(t), cat, serveOpts{
+	v, _, err := grantVerifier(context.Background(), jetstreamConn(t), cat, serveOpts{
 		jwksURLs: []string{"https://idp.test/jwks.json"}, audience: "garm",
 		grantIssuer: "https://sts.test",
 	})
@@ -243,7 +243,7 @@ func TestTheBucketIsSizedByTheLongestCeiling(t *testing.T) {
 // about what garmd serve constructs.
 func TestTheDaemonBuiltVerifierUsesTheTokenPathsClockSkew(t *testing.T) {
 	idp := newGrantIDP(t)
-	v, err := grantVerifier(context.Background(), jetstreamConn(t), gatedCatalogue(t),
+	v, _, err := grantVerifier(context.Background(), jetstreamConn(t), gatedCatalogue(t),
 		serveOpts{
 			jwksURLs: []string{idp.url}, audience: cmdGrantAudience,
 			grantIssuer: cmdGrantIssuer,
@@ -300,7 +300,7 @@ func TestGrantFlagsAreAllOrNone(t *testing.T) {
 			"--grant-audience"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), tc.o)
+			_, _, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), tc.o)
 			if err == nil {
 				t.Fatalf("a half-given grant configuration was accepted: %+v", tc.o)
 			}
@@ -377,4 +377,95 @@ func (i *grantIDP) mintGrant(t *testing.T, subject string, expiresIn time.Durati
 		t.Fatal(err)
 	}
 	return tok
+}
+
+// fixedCache is a replay cache that only reports what it keeps. The retention
+// is the whole question here: Spend is never called.
+type fixedCache struct{ ttl time.Duration }
+
+func (c fixedCache) Spend(context.Context, string) error { return nil }
+func (c fixedCache) Retention() time.Duration            { return c.ttl }
+
+// The gap KNOWN-GAPS names in its sharpest form: the replay bucket's expiry is
+// derived ONCE, at startup, from the boot catalogue's longest ceiling, and a
+// reload does not re-derive it. A generation raising that ceiling past what the
+// bucket keeps mounts perfectly happily and leaves an approval replayable after
+// its spent-record has expired — so the reload has to refuse it, which is the
+// only honest answer a process that cannot resize its bucket can give.
+func TestAReloadRaisingAGrantCeilingPastTheCacheIsRefused(t *testing.T) {
+	// A bucket sized for the boot catalogue's 15 minutes, plus the skew the
+	// verifier allows past a ceiling.
+	guard := reloadGuard(fixedCache{ttl: 15*time.Minute + authn.DefaultSkew})
+
+	if err := guard(gatedCatalogue(t)); err != nil {
+		t.Fatalf("the generation the bucket was sized for was refused: %v", err)
+	}
+
+	next := gatedCatalogue(t)
+	next.Defs[0].MaxGrantAge = 2 * time.Hour
+	err := guard(next)
+	if err == nil {
+		t.Fatal("a generation declaring approvals valid for longer than the replay " +
+			"cache keeps them was admitted; a grant would be replayable in the gap")
+	}
+	if !strings.Contains(err.Error(), "replay cache") {
+		t.Errorf("the refusal does not say what refused: %v", err)
+	}
+}
+
+// The same check startup makes, on the same footing: a MODE_GRANT tool with no
+// ceiling has no age this plane can enforce and no number the cache can be
+// sized from. Arriving by reload does not make it acceptable.
+func TestAReloadIntroducingAGatedToolWithNoCeilingIsRefused(t *testing.T) {
+	guard := reloadGuard(fixedCache{ttl: time.Hour})
+
+	next := gatedCatalogue(t)
+	next.Defs[0].MaxGrantAge = 0
+	err := guard(next)
+	if err == nil {
+		t.Fatal("a MODE_GRANT tool with no max_grant_age_seconds was admitted by a " +
+			"reload, though startup refuses the same catalogue")
+	}
+	if !strings.Contains(err.Error(), "t.v1.pay") {
+		t.Errorf("the refusal does not name the tool: %v", err)
+	}
+}
+
+// A deployment with no verifier has no bucket to outlast. The guard is nil
+// there rather than a function that always says yes, because the poller reads
+// nil as "nothing more to ask" and a MODE_GRANT generation is refused by the
+// mount check anyway.
+func TestWithNoGrantIssuerThereIsNoReloadGuard(t *testing.T) {
+	_, guard, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), serveOpts{})
+	if err != nil {
+		t.Fatalf("grantVerifier: %v", err)
+	}
+	if guard != nil {
+		t.Error("a deployment with no grant verifier built a reload guard")
+	}
+}
+
+// And a deployment WITH one hands the poller a guard reading the bucket the
+// verifier actually got — not the number startup asked for. An older
+// deployment may have created the bucket with a different expiry, and
+// NewJetStream reads it back for exactly that reason.
+func TestAGrantVerifierComesWithTheReloadGuardForItsBucket(t *testing.T) {
+	nc := jetstreamConn(t)
+	v, guard, err := grantVerifier(context.Background(), nc, gatedCatalogue(t), serveOpts{
+		jwksURLs:    []string{"https://idp.test/jwks.json"},
+		audience:    "garm",
+		grantIssuer: "https://sts.test",
+	})
+	if err != nil {
+		t.Fatalf("grantVerifier: %v", err)
+	}
+	if v == nil || guard == nil {
+		t.Fatal("--grant-issuer was set and the reload guard is nil")
+	}
+	next := gatedCatalogue(t)
+	next.Defs[0].MaxGrantAge = 30 * 24 * time.Hour
+	if err := guard(next); err == nil {
+		t.Error("a month-long ceiling was admitted against a bucket sized for fifteen " +
+			"minutes")
+	}
 }

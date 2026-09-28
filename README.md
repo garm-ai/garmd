@@ -13,15 +13,32 @@ Named for the hound that guards the gate in Norse myth, which is what this does.
 
 A garmd build does not know which tools exist. It loads a **catalogue
 artifact** — a descriptor set plus the annotations that govern it — at startup,
-and serves exactly what that artifact declares. A file on disk and an object
-in an S3-compatible store are both implemented as a source for that artifact,
-though `--catalogue` cannot yet take an `s3://` URL — that flag wiring is a
-later task.
+and serves exactly what that artifact declares. `--catalogue` takes a path or
+an `s3://bucket/key` URL; credentials come from the AWS default chain, and
+`AWS_ENDPOINT_URL` points it at SeaweedFS or MinIO.
 
-Adding a tool is a catalogue rebuild and a restart, not a release of this
-binary. Identity is the pair `(binary version, catalogue digest)`, reported at
-startup, on the health endpoint and on every ledger event, so *which tools is
-this process serving* stays exactly answerable.
+Adding a tool is a catalogue rebuild, not a release of this binary. Identity is
+the pair `(binary version, catalogue digest)`, reported at startup, on the
+health endpoint and on every ledger event, so *which tools is this process
+serving* stays exactly answerable.
+
+**An `s3://` catalogue is reloaded without a restart, or refused.**
+`--catalogue-poll` (30s by default, `0` to turn it off) checks the object's
+ETag; when it changes,
+the bytes are read once and everything that can refuse runs on them before
+anything is swapped — they must load, their compartment declarations must
+build a taxonomy, their approval ceilings must still be covered by the replay
+cache this process opened at startup, and the chain must mount every tool they
+declare. Only then does the new generation become the one being served, and its
+taxonomy reach the verifier in the same operation.
+
+Any refusal leaves the previous generation serving and logs at error naming
+both digests — the one still serving and the one refused. A store that cannot
+be reached is a warning and no swap: a bucket nobody can read is not evidence
+that what is serving is wrong, and withdrawing a working catalogue is the one
+thing to avoid at the moment nobody can replace it. A file catalogue is never
+polled; it is placed by whoever deployed the binary and does not change
+underneath it.
 
 A binary reads the current annotation schema and the two previous. Backward is
 generous; forward fails closed at boot rather than loading a policy document it
