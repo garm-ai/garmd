@@ -13,6 +13,11 @@
 - `internal/serve` — the agent-facing surface. Dynamic dispatch: a request is
   unmarshalled into a message built from a catalogue descriptor, routed over
   NATS, and the reply unmarshalled into another. No generated types anywhere.
+- **The ledger row's id is on every answer**, as `Garm-Event-Id`, beside
+  `Garm-Catalogue-Digest` — on a success and on every refusal that reached the
+  chain, including step 1's. A route this build does not serve produces no row
+  and carries no id, because a header naming a row nobody can find sends
+  whoever is debugging to query a ledger that will never answer.
 - Reconciliation. A service advertises its descriptor hash; the catalogue
   records one per proto package; `garmd` compares them every 30s and refuses
   to route on a mismatch. Silence is not agreement, and a failed sweep leaves

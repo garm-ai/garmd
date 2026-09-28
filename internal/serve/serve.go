@@ -151,6 +151,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Where the chain will write the id of the row this call produces. It has
+	// to be established before step 1, because step 1's own refusal is
+	// ledgered too.
+	var eventID string
+	r = r.WithContext(toolplane.WithEventID(r.Context(), &eventID))
+
 	// A presented grant travels on the context to step 5, the same way the
 	// bearer token travels to step 1. Lifted, never verified here: a surface
 	// that judged a grant would be a second place approvals are decided.
@@ -171,7 +177,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// and the row for it belongs in the same place as every other outcome.
 	principal, err := h.principal(r)
 	if err != nil {
-		refuse(w, pl.core.Unauthenticated(r.Context(), r.URL.Path, err))
+		refused := pl.core.Unauthenticated(r.Context(), r.URL.Path, err)
+		setEventID(w, eventID)
+		refuse(w, refused)
 		return
 	}
 
@@ -221,6 +229,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Steps 2 through 10. The hop is registered as this chain's resolver, so
 	// there is no way to reach the tool that does not pass through here.
 	resp, err := pl.core.Invoke(r.Context(), principal, def.FullMethod, req)
+	// Before the branch, so the id is on the response whether the chain
+	// answered or refused. Both produced a row.
+	setEventID(w, eventID)
 	if err != nil {
 		h.writeChainErr(w, def, err)
 		return
@@ -251,6 +262,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // a human agreed you may do once — and conflating them would make a grant
 // look like a way to authenticate.
 const GrantHeader = "Garm-Grant"
+
+// EventHeader names the ledger row this call produced.
+//
+// It is the join key. The ledger holds the whole story of a call — who was
+// asked, what was refused, which fields were redacted — and the caller holds
+// none of it, so a caller reconciling its own step record against the ledger
+// otherwise has only a timestamp, which stops discriminating the moment two
+// calls land in the same second.
+//
+// It is written only when a row actually exists. A header naming a row nobody
+// can find is worse than no header: it sends whoever is debugging to query a
+// ledger that will never answer.
+const EventHeader = "Garm-Event-Id"
+
+// setEventID puts the row's id on the response, if there is one.
+//
+// Called before the status is written on every path that ran the chain, and
+// never on one that did not. Header mutation after WriteHeader is silently
+// dropped by net/http, which is exactly the kind of failure that would pass
+// every test that only checks a status.
+func setEventID(w http.ResponseWriter, id string) {
+	if id != "" {
+		w.Header().Set(EventHeader, id)
+	}
+}
 
 // writeGrantRequired answers a gated call that arrived without one.
 func writeGrantRequired(w http.ResponseWriter, def tool.Def) {

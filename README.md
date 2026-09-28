@@ -37,7 +37,14 @@ only partly understands.
 
 ## Status
 
-Skeleton. `serve` is not implemented and returns an error rather than binding a
-listener it has nothing to serve on.
+`serve` binds a listener and routes tool calls: one route,
+`POST /pkg.Service/Method`, dispatched dynamically from the catalogue's
+descriptors and answered through the chain. Every answer carries
+`Garm-Catalogue-Digest` — which catalogue produced it — and, whenever the call
+reached the chain and so produced a ledger row, `Garm-Event-Id`: the id of that
+row, which is how a caller joins its own record of a call to the ledger's.
+
+Not every step of the chain is implemented. `KNOWN-GAPS.md` is the list, and it
+is kept honest rather than aspirational.
 
 MIT licensed.

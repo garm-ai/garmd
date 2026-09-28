@@ -88,6 +88,9 @@ The ones that govern this repository:
 
 ## Not yet built
 
-Everything. `serve` returns an error rather than binding a listener it has
-nothing to serve on. The order is catalogue first, then the chain ported onto
-it — so the compiled-in registry path is never ported at all.
+Not everything, any more. The catalogue loads, `serve` binds and routes, and
+the chain runs on every call — a response carries `Garm-Catalogue-Digest` and,
+where the call produced a ledger row, `Garm-Event-Id` naming it. Several chain
+steps are still nil, which the chain treats as "not declared" and refuses to
+mount a tool that needs one. `KNOWN-GAPS.md` is the list; read it rather than
+this section.

@@ -442,6 +442,9 @@ func (c *Core) invoke(
 	// escapes with an unset outcome should read as "blocked", never as
 	// "fine".
 	ev := c.newEvent(p, procedure)
+	// Before anything can return. Every path below this line is terminal for
+	// exactly one row, and the surface needs its id whichever one fires.
+	noteEventID(ctx, ev.ID)
 	var (
 		tool  ToolDef
 		abort any
@@ -734,6 +737,7 @@ func (c *Core) newEvent(p *Principal, procedure string) ledger.Event {
 // caller, because the surface is where step 1 happens.
 func (c *Core) Unauthenticated(ctx context.Context, procedure string, cause error) error {
 	ev := c.newEvent(nil, procedure)
+	noteEventID(ctx, ev.ID)
 	ev.ErrorDetail = "no principal for " + procedure
 	if cause != nil {
 		ev.ErrorDetail += ": " + cause.Error()
