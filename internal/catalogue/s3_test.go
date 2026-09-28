@@ -32,8 +32,8 @@ type fakeS3 struct {
 	// omitted header, and one the source must refuse just the same.
 	emptyETag bool
 	code      int // when non-zero, every request gets this status
-	gets int
-	head int
+	gets      int
+	head      int
 }
 
 func newFakeS3(t *testing.T, body []byte, etag string) (*fakeS3, *s3.Client) {
