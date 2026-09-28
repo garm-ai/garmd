@@ -199,7 +199,14 @@ func grantJWKS(o serveOpts) string {
 	if o.grantJWKS != "" {
 		return o.grantJWKS
 	}
-	return o.jwksURL
+	// The FIRST --jwks. With one pair — the ordinary deployment — that is the
+	// only one. With several it is a guess, which is why --grant-jwks exists
+	// and why a deployment with two issuers should set it: approvals come from
+	// the STS, and the STS is rarely the first entry.
+	if len(o.jwksURLs) > 0 {
+		return o.jwksURLs[0]
+	}
+	return ""
 }
 
 func grantAudience(o serveOpts) string {

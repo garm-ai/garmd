@@ -32,14 +32,50 @@ var permittedAlgorithms = []jose.SignatureAlgorithm{
 	jose.PS256, jose.PS384, jose.PS512,
 }
 
+// TrustedIssuer is one issuer and the key set that signs for it.
+//
+// A PAIR, because the two are one fact. A verifier holding several issuers and
+// one key set trusts whoever can answer that URL to sign for every issuer on
+// the list — which is fine while there is one IdP and wrong the moment there
+// are two, since the STS could then mint tokens claiming the enterprise IdP's
+// name and this daemon would verify them.
+//
+// It is also where a rule that applies to ONE issuer's tokens belongs. The
+// runner's token from the STS carries an `exec` claim the human's token from
+// the IdP does not, and Verify knows which entry's keys verified a token
+// before it reads the body — so the per-issuer requirement has somewhere to
+// attach when there is one. There is none here yet.
+type TrustedIssuer struct {
+	// Issuer is the exact `iss` value. Compared, never parsed.
+	Issuer string
+
+	// KeySet supplies the public keys for THIS issuer, and only this one.
+	KeySet *KeySet
+}
+
 // Config configures a Verifier.
 type Config struct {
-	// KeySet supplies the public keys. Required.
+	// Trusted is the issuers this deployment accepts, each with its own keys.
+	// Required, unless the single-pair KeySet/Issuers form below is used.
+	Trusted []TrustedIssuer
+
+	// KeySet and Issuers are the single-key-set form, kept because it is what
+	// every embedder, every other test here and the conformance runner build.
+	// NewVerifier folds them into Trusted; nothing below reads them directly.
+	//
+	// It is not a deprecated alias: one key set for one issuer is the ordinary
+	// deployment, and making it spell a slice would be churn for its own sake.
+	// Several issuers against one key set still means exactly what it meant —
+	// they share an IdP — which is why this form is not simply removed. A
+	// Config setting both forms is refused rather than merged, because which
+	// key set signs for a repeated issuer would then depend on the order the
+	// fold happened to run in.
 	KeySet *KeySet
 
-	// Issuers is the allowlist of acceptable `iss` values. Required and
-	// deliberately not optional: a verifier that accepts any issuer accepts
-	// any IdP that can produce a key under a kid it has seen.
+	// Issuers is the allowlist of acceptable `iss` values for KeySet.
+	// Required with it and deliberately not optional: a verifier that accepts
+	// any issuer accepts any IdP that can produce a key under a kid it has
+	// seen.
 	Issuers []string
 
 	// Audience is the `aud` this deployment answers to. Required. A token
@@ -104,13 +140,61 @@ func NewVerifier(cfg Config) *Verifier {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	// Folded once, here, so Verify has one shape to read. An entry per issuer
+	// sharing the one key set is exactly what the old behaviour was.
+	bothForms := len(cfg.Trusted) > 0 && (cfg.KeySet != nil || len(cfg.Issuers) > 0)
+	if len(cfg.Trusted) == 0 && cfg.KeySet != nil {
+		for _, iss := range cfg.Issuers {
+			cfg.Trusted = append(cfg.Trusted, TrustedIssuer{Issuer: iss, KeySet: cfg.KeySet})
+		}
+	}
+
 	v := &Verifier{cfg: cfg}
 	if cfg.Compartments != nil && cfg.CompartmentSource != nil {
 		v.cfgErr = fmt.Errorf("authn: Config sets both Compartments and " +
 			"CompartmentSource; set one, because two taxonomies is two answers " +
 			"to which compartments exist")
+		return v
 	}
+	if bothForms {
+		v.cfgErr = fmt.Errorf("authn: Config sets both Trusted and the single-pair " +
+			"KeySet/Issuers form; set one, because an issuer named by both would " +
+			"be signed for by whichever key set the fold reached first")
+		return v
+	}
+	v.cfgErr = checkTrusted(cfg.Trusted)
 	return v
+}
+
+// checkTrusted refuses a list that cannot be served, in the shape Verify will
+// read it.
+//
+// Each of these is a configuration fault that would otherwise surface as a
+// TOKEN fault at runtime: an entry with no key set is skipped by selection and
+// reported as "that issuer is not allowed", and a repeated issuer means the
+// second entry's key set is never consulted, so tokens signed by it are
+// refused with a message about the key. Both send whoever is paged to look at
+// an IdP that is working.
+func checkTrusted(trusted []TrustedIssuer) error {
+	seen := make(map[string]bool, len(trusted))
+	for _, t := range trusted {
+		if t.Issuer == "" {
+			return fmt.Errorf("authn: a trusted entry names no issuer; a key set with " +
+				"nothing to match against signs for nobody")
+		}
+		if t.KeySet == nil {
+			return fmt.Errorf("authn: the trusted entry for issuer %q has no key set, so "+
+				"every token it mints would be refused as though the issuer were not "+
+				"allowed", t.Issuer)
+		}
+		if seen[t.Issuer] {
+			return fmt.Errorf("authn: issuer %q is trusted twice; the first entry wins "+
+				"every lookup and the second's key set would never be consulted",
+				t.Issuer)
+		}
+		seen[t.Issuer] = true
+	}
+	return nil
 }
 
 // Verify checks a token's signature and registered claims, then folds the
@@ -133,8 +217,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*toolplane.Princip
 		return nil, nil, v.cfgErr
 	}
 	reg := v.compartments(ctx)
-	if v.cfg.KeySet == nil || reg == nil ||
-		len(v.cfg.Issuers) == 0 || v.cfg.Audience == "" {
+	if len(v.cfg.Trusted) == 0 || reg == nil || v.cfg.Audience == "" {
 		return nil, nil, fmt.Errorf("authn: verifier is not configured")
 	}
 
@@ -155,7 +238,31 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*toolplane.Princip
 		return nil, nil, fmt.Errorf("authn: token has no kid")
 	}
 
-	key, err := v.cfg.KeySet.Key(ctx, kid)
+	// Which key set to try. This reads the payload BEFORE the signature has
+	// been checked, and it has to: a key set cannot be chosen after the
+	// verification it is needed for. Nothing is trusted on the strength of it
+	// — it selects a candidate and nothing else — and the loop is closed
+	// below, where the VERIFIED issuer is required to be the one whose keys
+	// worked. Without that second check, a token signed by one trusted issuer
+	// while claiming another's name would pass, because both are allowlisted.
+	//
+	// The alternative, trying every key set until one verifies, is worse: two
+	// IdPs may publish the same kid, and "some trusted party signed this"
+	// is not the question.
+	trusted, ok := v.trustedFor(sig.UnsafePayloadWithoutVerification())
+	if !ok {
+		// Deliberately the same refusal as an issuer outside the allowlist: a
+		// caller must not be able to tell "not configured here" from "not
+		// trusted here" by the message.
+		return nil, nil, fmt.Errorf("authn: the token's issuer is not allowed")
+	}
+
+	// The error is returned as it comes, so the distinction Key draws survives:
+	// ErrNoSuchKey is the caller's fault and everything else — a refused fetch,
+	// a set too stale to serve — means this process could not find out, which
+	// is the operator's. Wrapping them into one message here is how a garbage
+	// kid and an unreachable IdP become the same page.
+	key, err := trusted.KeySet.Key(ctx, kid)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -174,6 +281,16 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*toolplane.Princip
 	if err != nil {
 		return nil, nil, fmt.Errorf("authn: %w", err)
 	}
+	// The loop closed. The signature verified under the key set chosen from an
+	// UNVERIFIED claim, so the verified claim must be the same one — otherwise
+	// issuer A's key has just authenticated a token bearing issuer B's name.
+	//
+	// This is also the point at which the issuer a token was actually signed
+	// for is known, which is where a per-issuer claim requirement would go.
+	if claims.Issuer != trusted.Issuer {
+		return nil, nil, fmt.Errorf("authn: the token was signed for issuer %q and "+
+			"claims to be from %q", trusted.Issuer, claims.Issuer)
+	}
 	if err := v.checkRegistered(claims, raw); err != nil {
 		return nil, nil, err
 	}
@@ -183,6 +300,27 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*toolplane.Princip
 		return nil, nil, fmt.Errorf("authn: %w", err)
 	}
 	return p, dropped, nil
+}
+
+// trustedFor selects the issuer entry an unverified payload names.
+//
+// Unmarshalled leniently and read for exactly one field: a payload that is not
+// an object, or names no issuer, selects nothing. Selecting nothing must be a
+// refusal rather than a fallback to the first entry, or the first-listed
+// issuer becomes the default signer for every token that forgot to say.
+func (v *Verifier) trustedFor(payload []byte) (TrustedIssuer, bool) {
+	var body struct {
+		Issuer string `json:"iss"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil || body.Issuer == "" {
+		return TrustedIssuer{}, false
+	}
+	for _, t := range v.cfg.Trusted {
+		if t.Issuer == body.Issuer && t.KeySet != nil {
+			return t, true
+		}
+	}
+	return TrustedIssuer{}, false
 }
 
 // compartments is the taxonomy for THIS verification, read once.
@@ -214,7 +352,11 @@ func (v *Verifier) compartments(ctx context.Context) *policy.Registry {
 // acting, not a second token with its own lifetime — Fold intersects its
 // authority, and a nested actor cannot extend validity it never carried.
 func (v *Verifier) checkRegistered(c *Claims, raw map[string]any) error {
-	if !slices.Contains(v.cfg.Issuers, c.Issuer) {
+	// Kept as well as the equality against the selected entry in Verify. Two
+	// checks of the same fact, because they fail for different reasons: this
+	// one catches an entry list that drifted, and that one catches a token
+	// verified under the wrong issuer's key.
+	if !v.allowed(c.Issuer) {
 		return fmt.Errorf("authn: issuer %q is not allowed", c.Issuer)
 	}
 	if !slices.Contains(c.Audience, v.cfg.Audience) {
@@ -242,4 +384,13 @@ func (v *Verifier) checkRegistered(c *Claims, raw map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func (v *Verifier) allowed(issuer string) bool {
+	for _, t := range v.cfg.Trusted {
+		if t.Issuer == issuer {
+			return true
+		}
+	}
+	return false
 }

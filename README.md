@@ -27,6 +27,11 @@ A binary reads the current annotation schema and the two previous. Backward is
 generous; forward fails closed at boot rather than loading a policy document it
 only partly understands.
 
+Identity is configured the same way: `--issuer` and `--jwks` are repeatable and
+paired by position, one key set per issuer. A deployment serving an agent
+verifies the human's token from its IdP and the runner's from the STS in one
+process, and a single key set for both would let either sign for the other.
+
 ## What is deliberately not here
 
 - **The annotations and the generator** — [`garm`](https://github.com/garm-ai/garm).

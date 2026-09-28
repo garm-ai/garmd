@@ -50,7 +50,7 @@ func TestWithNoGrantIssuerThereIsNoVerifierAtAll(t *testing.T) {
 func TestTheGrantIssuerFlagBuildsAUsableVerifier(t *testing.T) {
 	nc := jetstreamConn(t)
 	v, err := grantVerifier(context.Background(), nc, gatedCatalogue(t), serveOpts{
-		jwksURL:     "https://idp.test/jwks.json",
+		jwksURLs:    []string{"https://idp.test/jwks.json"},
 		audience:    "garm",
 		grantIssuer: "https://sts.test",
 	})
@@ -67,10 +67,10 @@ func TestTheGrantIssuerFlagBuildsAUsableVerifier(t *testing.T) {
 // making an operator type the same two values twice is how they end up
 // disagreeing.
 func TestTheGrantJWKSAndAudienceDefaultToTheTokenOnes(t *testing.T) {
-	o := serveOpts{jwksURL: "https://idp.test/jwks.json", audience: "garm",
+	o := serveOpts{jwksURLs: []string{"https://idp.test/jwks.json"}, audience: "garm",
 		grantIssuer: "https://sts.test"}
-	if got := grantJWKS(o); got != o.jwksURL {
-		t.Errorf("grant JWKS = %q, want the token JWKS %q", got, o.jwksURL)
+	if got := grantJWKS(o); got != o.jwksURLs[0] {
+		t.Errorf("grant JWKS = %q, want the token JWKS %q", got, o.jwksURLs[0])
 	}
 	if got := grantAudience(o); got != o.audience {
 		t.Errorf("grant audience = %q, want the token audience %q", got, o.audience)
@@ -186,7 +186,7 @@ func TestAGatedToolWithNoCeilingRefusesToStart(t *testing.T) {
 	})
 
 	_, err := grantVerifier(context.Background(), nil, cat, serveOpts{
-		jwksURL: "https://idp.test/jwks.json", audience: "garm",
+		jwksURLs: []string{"https://idp.test/jwks.json"}, audience: "garm",
 		grantIssuer: "https://sts.test",
 	})
 	if err == nil {
@@ -213,7 +213,7 @@ func TestTheBucketIsSizedByTheLongestCeiling(t *testing.T) {
 	})
 
 	v, err := grantVerifier(context.Background(), jetstreamConn(t), cat, serveOpts{
-		jwksURL: "https://idp.test/jwks.json", audience: "garm",
+		jwksURLs: []string{"https://idp.test/jwks.json"}, audience: "garm",
 		grantIssuer: "https://sts.test",
 	})
 	if err != nil {
@@ -245,7 +245,7 @@ func TestTheDaemonBuiltVerifierUsesTheTokenPathsClockSkew(t *testing.T) {
 	idp := newGrantIDP(t)
 	v, err := grantVerifier(context.Background(), jetstreamConn(t), gatedCatalogue(t),
 		serveOpts{
-			jwksURL: idp.url, audience: cmdGrantAudience,
+			jwksURLs: []string{idp.url}, audience: cmdGrantAudience,
 			grantIssuer: cmdGrantIssuer,
 		})
 	if err != nil {
@@ -284,18 +284,18 @@ func TestGrantFlagsAreAllOrNone(t *testing.T) {
 		want string
 	}{
 		{"jwks without issuer",
-			serveOpts{jwksURL: "https://idp.test/jwks.json", audience: "garm",
+			serveOpts{jwksURLs: []string{"https://idp.test/jwks.json"}, audience: "garm",
 				grantJWKS: "https://sts.test/jwks.json"},
 			"--grant-jwks"},
 		{"audience without issuer",
-			serveOpts{jwksURL: "https://idp.test/jwks.json", audience: "garm",
+			serveOpts{jwksURLs: []string{"https://idp.test/jwks.json"}, audience: "garm",
 				grantAudience: "garm://garmd"},
 			"--grant-audience"},
 		{"issuer with no key set anywhere",
 			serveOpts{audience: "garm", grantIssuer: "https://sts.test"},
 			"--grant-jwks"},
 		{"issuer with no audience anywhere",
-			serveOpts{jwksURL: "https://idp.test/jwks.json",
+			serveOpts{jwksURLs: []string{"https://idp.test/jwks.json"},
 				grantIssuer: "https://sts.test"},
 			"--grant-audience"},
 	} {

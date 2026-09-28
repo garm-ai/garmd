@@ -39,8 +39,14 @@
   records one per proto package; `garmd` compares them every 30s and refuses
   to route on a mismatch. Silence is not agreement, and a failed sweep leaves
   the previous verdict standing.
-- `internal/authn` — step 1. JWT over a cached JWKS, issuer and audience
-  allowlists, and delegation folding that can only narrow.
+- `internal/authn` — step 1. JWT over cached JWKS, and `--issuer`/`--jwks` are
+  repeatable and paired by position: one key set per issuer, chosen by the
+  token's own `iss` and then required to match the issuer whose keys verified
+  it. That second check is the load-bearing half — routing on an unverified
+  claim without it would let one trusted issuer mint tokens bearing another's
+  name. The governed door needs it: a human's token comes from an IdP and the
+  runner's from the STS, in one process. Audience allowlist, and delegation
+  folding that can only narrow.
 - **A request folds its token against the generation it is being served by.**
   The surface reads the plane once and pins that chain's compartment registry
   on the request (`authn.WithRegistry`), and step 1 folds against it. A

@@ -103,7 +103,8 @@ func bytesHuman(n int64) string {
 
 func newServeCmd() *cobra.Command {
 	var cataloguePath, natsURL, listen string
-	var jwksURL, issuer, audience, hashKeyFile string
+	var audience, hashKeyFile string
+	var jwksURLs, issuers []string
 	var grantIssuer, grantJWKSURL, grantAudienceName string
 	var maxTools int
 	var auditRetention time.Duration
@@ -118,8 +119,8 @@ func newServeCmd() *cobra.Command {
 				natsURL:   natsURL,
 				listen:    listen,
 				maxTools:  maxTools,
-				jwksURL:   jwksURL,
-				issuer:    issuer,
+				jwksURLs:  jwksURLs,
+				issuers:   issuers,
 				audience:  audience,
 				hashKey:   hashKeyFile,
 
@@ -149,14 +150,18 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().IntVar(&maxTools, "max-tools", 0,
 		"Refuse a catalogue declaring more tools than this. 0 means no limit; "+
 			"set it to catch a deployment pointed at the wrong catalogue")
-	cmd.Flags().StringVar(&jwksURL, "jwks", "",
-		"JWKS endpoint whose keys sign the tokens this plane accepts. Required: "+
-			"a plane that cannot identify its callers can make only one honest "+
-			"decision, and it is not to serve them")
-	cmd.Flags().StringVar(&issuer, "issuer", "",
-		"Issuer this plane trusts. Required, and separate from --jwks on purpose: "+
-			"trusting whatever iss a fetched key set happens to sign means trusting "+
-			"whoever can answer that URL")
+	cmd.Flags().StringArrayVar(&jwksURLs, "jwks", nil,
+		"JWKS endpoint whose keys sign the tokens this plane accepts. Required, and "+
+			"REPEATABLE: give it once per --issuer, in the same order. A plane that "+
+			"cannot identify its callers can make only one honest decision, and it is "+
+			"not to serve them")
+	cmd.Flags().StringArrayVar(&issuers, "issuer", nil,
+		"Issuer this plane trusts, paired with the --jwks at the same position. "+
+			"Repeatable: the governed door verifies a human's token from an IdP and a "+
+			"runner's from the STS in one process, and one key set for both would let "+
+			"either sign for the other. Separate from --jwks on purpose: trusting "+
+			"whatever iss a fetched key set happens to sign means trusting whoever can "+
+			"answer that URL")
 	cmd.Flags().StringVar(&audience, "audience", "garm",
 		"Audience minted tokens must name. A token for another service must not "+
 			"be spendable here")
@@ -182,9 +187,11 @@ func newServeCmd() *cobra.Command {
 			"is the correct refusal — an approval-gated tool served with no verifier "+
 			"is an approval nobody gave")
 	cmd.Flags().StringVar(&grantJWKSURL, "grant-jwks", "",
-		"JWKS endpoint whose keys sign approval grants. Defaults to --jwks, because an "+
-			"STS that issues both tokens and approvals is the ordinary deployment and "+
-			"typing the same URL twice is how the two end up disagreeing")
+		"JWKS endpoint whose keys sign approval grants. Defaults to the FIRST --jwks, "+
+			"because an STS that issues both tokens and approvals is the ordinary "+
+			"deployment and typing the same URL twice is how the two end up disagreeing. "+
+			"Set it explicitly where --jwks is given more than once: approvals come from "+
+			"the STS, which is rarely the first one written")
 	cmd.Flags().StringVar(&grantAudienceName, "grant-audience", "",
 		"Audience an approval grant must name. Defaults to --audience. A grant minted "+
 			"for another deployment is a VALID grant, and this is the only thing that "+
@@ -197,10 +204,13 @@ type serveOpts struct {
 	natsURL   string
 	listen    string
 	maxTools  int
-	jwksURL   string
-	issuer    string
-	audience  string
-	hashKey   string
+	// Paired by position: jwksURLs[i] is the key set for issuers[i]. Two
+	// slices rather than one slice of pairs because they arrive as two flags,
+	// and trustedIssuers is the single place that turns them into pairs.
+	jwksURLs []string
+	issuers  []string
+	audience string
+	hashKey  string
 
 	grantIssuer   string
 	grantJWKS     string
@@ -231,12 +241,9 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// authorised as nobody. Running locally is not a reason to relax it —
 	// `garmdev idp` from github.com/garm-ai/devkit mints tokens against a
 	// real key set for exactly this.
-	if o.jwksURL == "" || o.issuer == "" {
-		return fmt.Errorf("--jwks and --issuer are both required: garmd decides what a " +
-			"caller may do, which it cannot do without knowing who they are.\n" +
-			"For a laptop: `go run github.com/garm-ai/devkit/cmd/garmdev idp` then\n" +
-			"  --jwks http://127.0.0.1:7450/.well-known/jwks.json \\\n" +
-			"  --issuer https://garmdev.invalid/idp")
+	trusted, err := trustedIssuers(o.issuers, o.jwksURLs)
+	if err != nil {
+		return err
 	}
 	hashKey, err := readHashKey(o.hashKey)
 	if err != nil {
@@ -345,12 +352,12 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	// else.
 	rec := &serve.Reconciler{Store: store, Discoverer: tp, Log: log}
 
-	// Step 1. The verifier fetches the key set lazily and caches it, so a
-	// slow or absent IdP at boot costs the first call rather than the
-	// process.
+	// Step 1. Each key set is fetched lazily and cached, so a slow or absent
+	// IdP at boot costs the first call from THAT issuer rather than the
+	// process — and a second issuer being down does not stop the first one's
+	// callers.
 	verifier := authn.NewVerifier(authn.Config{
-		KeySet:            authn.NewKeySet(authn.KeySetConfig{URL: o.jwksURL}),
-		Issuers:           []string{o.issuer},
+		Trusted:           trusted,
 		Audience:          o.audience,
 		CompartmentSource: compartments,
 	})
@@ -375,15 +382,20 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 		Grants: grantsFor,
 	}
 
-	// Ask the issuer what it actually mints, before binding.
+	// Ask each issuer what it actually mints, before binding.
 	//
 	// An issuer minting `garm://garmd` against a daemon defaulting to `garm`
 	// refuses every token at runtime, correctly, with a message about the
 	// token rather than the configuration. This turns that into a startup
 	// error naming both sides. An issuer that publishes nothing — the dev IdP,
 	// a stock enterprise IdP — is unchecked rather than refused.
-	if err := authn.CheckIssuerMetadata(cmd.Context(), o.jwksURL, o.issuer, o.audience); err != nil {
-		return err
+	//
+	// Every issuer, not the first: the one that is misconfigured is exactly
+	// the one nobody checked.
+	for i, t := range trusted {
+		if err := authn.CheckIssuerMetadata(cmd.Context(), o.jwksURLs[i], t.Issuer, o.audience); err != nil {
+			return err
+		}
 	}
 
 	// Before the listener. A catalogue declaring supervision this deployment
@@ -424,8 +436,13 @@ func runServe(cmd *cobra.Command, o serveOpts) error {
 	}()
 
 	fmt.Fprintf(out, "listening on %s, routing over %s\n", o.listen, nc.ConnectedUrl())
-	fmt.Fprintf(out, "  callers verified against %s (issuer %s, audience %s)\n",
-		o.jwksURL, o.issuer, o.audience)
+	// One line per issuer. An operator reading this is checking that the
+	// process trusts who they think it trusts, and a summary count would hide
+	// exactly the pairing that is wrong.
+	for i, t := range trusted {
+		fmt.Fprintf(out, "  callers verified against %s (issuer %s, audience %s)\n",
+			o.jwksURLs[i], t.Issuer, o.audience)
+	}
 	if o.ledgerStream {
 		fmt.Fprintf(out, "  ledger batched to %s, falling back to stdout\n", wire.LedgerStream)
 	} else {
