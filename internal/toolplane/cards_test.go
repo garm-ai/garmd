@@ -727,3 +727,55 @@ func TestACardVocabularyThisBuildHasNotMetIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// An input's CHOICES are elements too, and so is everything else in the card
+// that carries a label.
+//
+// The walk is generic over "this message has an `access` of type
+// garm.card.v1.Label", not over a list of message names, which is what makes
+// `body`, `actions`, `refs` and the interior of an `Input` one rule rather
+// than four. Today the contract labels Element, Fact, Choice and the Card;
+// the day it labels an Action, nothing here changes.
+func TestAChoiceTheViewerDoesNotReachIsRemovedFromItsInput(t *testing.T) {
+	files := cardFixture(t)
+	core := cardCore(t, files, &record.Memory{}, map[string]string{
+		cardApprovalProcedure: `{
+      "kind": "TASK", "title": "Approve", "state": "OPEN",
+      "body": [
+        {"input": {"id": "reason", "label": "Reason", "choice": {"choices": [
+          {"title": "Looks right", "value": "ok"},
+          {"title": "Sanctions concern", "value": "sanctions",
+           "access": {"clearance": "CLEARANCE_RESTRICTED",
+                      "compartments": ["financial", "compliance"]}}
+        ]}},
+         "access": {"clearance": "CLEARANCE_RESTRICTED", "compartments": ["financial"]}}
+      ],
+      "actions": [{"id": "approve", "label": "Approve"}],
+      "refs": [{"kind": "RUN", "subject_id": "run_1", "title": "The run"}]
+    }`,
+	})
+	amir := viewer(t, core, "user:amir", toolv1.Clearance_CLEARANCE_RESTRICTED, "financial")
+	resp, err := core.Invoke(context.Background(), amir, cardApprovalProcedure, emptyRef(t, files))
+	if err != nil {
+		t.Fatalf("the card was refused: %v", err)
+	}
+	got := textOf(t, resp)
+	if strings.Contains(got, "Sanctions concern") {
+		t.Errorf("a choice outside the viewer's reach stayed in the form: %s", got)
+	}
+	if !strings.Contains(got, "Looks right") {
+		t.Errorf("the choice the viewer reaches was dropped too: %s", got)
+	}
+	if !strings.Contains(got, `"withheldFields":["body[0].choices[1]"]`) {
+		t.Errorf("Disclosure = %s, want the choice's path", got)
+	}
+	// Unlabelled siblings are read at the endpoint's floor, which this viewer
+	// passed. An action or a ref the contract does not label is not thereby
+	// dropped.
+	for _, keep := range []string{"approve", "run_1"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("%q was dropped; an unlabelled element takes the endpoint's "+
+				"policy, which this viewer reaches: %s", keep, got)
+		}
+	}
+}

@@ -442,6 +442,15 @@ func (w *cardWalk) projectNode(m protoreflect.Message, path string) bool {
 // descendant. It returns how many labelled children survived and how many
 // there were.
 //
+// GENERIC over "this message carries an access label", not over a list of
+// message names. That is what makes `body`, `actions`, `refs` and the
+// interior of an `Input` one rule instead of four: a Choice inside a
+// ChoiceInput inside an Input inside an Element is reached by the same walk
+// that reaches a Fact inside a FactSet, and the day the contract labels an
+// Action nothing here changes. It is also why nothing here mentions a Section
+// — a Section is a message with labelled children, and "withheld whole when
+// every child went" is a property of that, not of its name.
+//
 // A message with no `access` of its own is TRANSPARENT: the walk descends
 // through it without extending the path, which is what makes an element's
 // path read `body[2].facts[1]` rather than `body[2].facts.facts[1]` — a
