@@ -91,6 +91,17 @@ deciding on.
 - **Agents.** An agent is a tool. garmd has no agent annotation, no dispatch
   kind and no agent-shaped field.
 
+## Running it in-process
+
+The binary is the way you run garmd. `garmd.Serve(ctx, garmd.Config{…})` — the
+root package, importable — is the same program with the flag parsing taken off
+the front, and there is one implementation behind both. It exists so
+`garm-ai/stack`'s `garmstack` can run garmd, the STS, agentd and the dev IdP as
+goroutines in one process for local development and demonstration, each still
+speaking NATS and HTTP to the others. That single-process mode is never for
+production: one process holding agentd's client key, the STS's signing key and
+this daemon's verifier configuration is one compromise away from all three.
+
 ## Status
 
 `serve` binds a listener and routes tool calls: one route,

@@ -68,7 +68,8 @@ internal/
 
 **Everything starts `internal/`.** A daemon has no library consumers until
 someone asks, and promoting a package later is easy where demoting one is
-breaking.
+breaking. One has asked: the root package is `garmd.Serve`, the entry point
+`cmd/garmd` and `garm-ai/stack`'s `garmstack` both call — never for production.
 
 **`internal/toolplane` keeps its name** even though this repository *is* the
 tool plane. 149 commits of design record refer to the tool plane and to
