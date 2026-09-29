@@ -152,6 +152,12 @@ func (v *Verifier) verify(
 	if err != nil {
 		return err
 	}
+	// Recorded BEFORE the checks, so a refused grant's binding reaches the
+	// ledger too. Nothing here reads it — see grantClaims.Task — and nothing
+	// downstream may: it is attribution, and a claim that could deny a call
+	// would be a second place to look when one is refused.
+	toolplane.NoteGrantBinding(ctx, toolplane.GrantBinding{TaskID: cl.Task})
+
 	if err := v.checkShape(cl, p, t); err != nil {
 		return err
 	}

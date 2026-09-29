@@ -109,6 +109,26 @@ small catalogue against a bucket holding a large bad one carries both.
   production arrangement. **When garm v0.17.0 lands and go.mod is bumped,
   delete both copies** and let the fixtures compile against the linked
   contract again.
+- **A grant's task reaches the ledger row.** The STS binds an approval to the
+  task it was given on (cards-and-tasks design §7), so two tasks with the same
+  material — the same payment asked twice — cannot share one grant. When the
+  claim is present it lands on the row as the `task_id` TAG, whether the grant
+  verified or not: "an approval naming task X was presented and rejected" and
+  "no approval naming a task was ever presented" are different facts. Both
+  spellings are read (`garm_grant.task`, which the STS mints, and `task_id`,
+  the request field it is copied from). A tag rather than a column because
+  `ledger.Event` is shared with every other plane and has no slot; promote it
+  when a second caller asks.
+
+  **garmd does not CHECK the binding, and that is deliberate.** The thing that
+  knows which task is being decided is the caller that opened it — the tasks
+  tool, comparing the claim against the row it stored — and a check here would
+  have nothing to compare against but itself. What garmd owes the claim is that
+  it does not FAIL a grant: a verifier that refused what it did not recognise
+  would make every claim the STS adds a breaking change, and the symptom would
+  be every approval in the estate failing at once on the day the STS shipped
+  it. `internal/grants/verify_test.go` pins the acceptance and the reporting;
+  the tasks tool owes the comparison.
 - **Validation violations reach the caller, projected.** A request that
   breaks a `buf.validate` rule answers 400 with `violations: [{field, rule,
   message}]`. The disclosure rule (`toolplane/violations.go`): a violation is

@@ -390,3 +390,78 @@ func TestAToolWithoutAGrantModeIsNotChecked(t *testing.T) {
 		t.Errorf("a tool declaring no approval was checked for one: %v", err)
 	}
 }
+
+// A grant carrying a `task` claim verifies (cards-and-tasks design §7).
+//
+// The STS binds a grant to the task it was given on, so two tasks with the
+// same material — the same payment asked twice — cannot share one. garmd's
+// verifier does NOT read the claim to decide with: the thing that knows which
+// task is being decided is the tasks tool, comparing the claim against the row
+// it stored, and a check here would have nothing to compare against but
+// itself.
+//
+// What this pins is the half that CAN go wrong from here: a claim garmd does
+// not read must not fail a grant. A verifier that refused what it did not
+// recognise would make every claim the STS adds a breaking change, and the
+// symptom would be every approval in the estate failing at once on the day
+// the STS shipped.
+func TestAGrantCarryingATaskClaimVerifies(t *testing.T) {
+	f := newFixture(t)
+	for name, claim := range map[string]string{"task": "task", "task_id": "task_id"} {
+		t.Run(name, func(t *testing.T) {
+			token := f.claims(func(_, g map[string]any) { g[claim] = "tsk_01HZY" })
+			if err := f.verify(t, token); err != nil {
+				t.Fatalf("a grant bound to a task was refused: %v", err)
+			}
+		})
+	}
+}
+
+// And the binding reaches whoever asked for it, refused or not.
+//
+// Before the checks, deliberately: "an approval naming task X was presented
+// and rejected" and "no approval naming a task was ever presented" are
+// different facts, and only the first is worth waking up for.
+func TestTheTaskBindingIsReportedWhetherTheGrantIsGoodOrNot(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mut      func(body, g map[string]any)
+		wantPass bool
+	}{
+		"a good grant": {func(_, g map[string]any) { g["task"] = "tsk_ok" }, true},
+		"a grant for another tool": {func(_, g map[string]any) {
+			g["task"] = "tsk_ok"
+			g["tool"] = "t.v1.something_else"
+		}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			var got toolplane.GrantBinding
+			ctx := toolplane.WithGrantBindingForTest(context.Background(), &got)
+			ctx = grants.WithGrant(ctx, f.claims(tc.mut))
+
+			err := f.v.Verify(ctx, caller(), payTool(), theRequest())
+			if tc.wantPass != (err == nil) {
+				t.Fatalf("Verify err = %v, wantPass = %v", err, tc.wantPass)
+			}
+			if got.TaskID != "tsk_ok" {
+				t.Errorf("the binding reported %q, want tsk_ok", got.TaskID)
+			}
+		})
+	}
+}
+
+// A grant with no task claim reports no binding, so the ledger tag is absent
+// rather than empty. A column that is always filled distinguishes nothing.
+func TestAGrantWithNoTaskReportsNoBinding(t *testing.T) {
+	f := newFixture(t)
+	var got toolplane.GrantBinding
+	ctx := toolplane.WithGrantBindingForTest(context.Background(), &got)
+	ctx = grants.WithGrant(ctx, f.claims(nil))
+
+	if err := f.v.Verify(ctx, caller(), payTool(), theRequest()); err != nil {
+		t.Fatalf("a valid grant was refused: %v", err)
+	}
+	if got.TaskID != "" {
+		t.Errorf("a grant naming no task reported %q", got.TaskID)
+	}
+}

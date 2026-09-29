@@ -886,7 +886,21 @@ func (c *Core) verifyGrant(
 	// human saw. Without it an approval covers the tool for a window rather
 	// than the call, and fifteen minutes of authority to call initiate_payment
 	// is not what anybody clicking approve believes they are giving.
-	if err := c.grants.Verify(ctx, p, tool, req); err != nil {
+	//
+	// The binding destination is seeded here and read whatever the verifier
+	// answers, because what a REFUSED grant was bound to is a row somebody
+	// investigating wants as much as an accepted one's: "an approval for task
+	// X was presented and rejected" and "no approval naming a task was ever
+	// presented" are different facts.
+	var binding GrantBinding
+	err := c.grants.Verify(withGrantBinding(ctx, &binding), p, tool, req)
+	if binding.TaskID != "" {
+		if ev.Tags == nil {
+			ev.Tags = map[string]string{}
+		}
+		ev.Tags[LedgerTagTaskID] = binding.TaskID
+	}
+	if err != nil {
 		ev.ErrorDetail = "grant verification refused: " + err.Error()
 		// Passed through rather than flattened. A missing grant and a wrong
 		// one are different things to a caller: the first has a next move and

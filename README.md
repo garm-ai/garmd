@@ -204,6 +204,14 @@ large or one that would not unmarshal — produce no row and so carry no id.
 A successful answer also carries `Garm-Catalogue-Digest`, naming the catalogue
 that served it. Refusals do not carry it today.
 
+An approval may name the task it was given on — `garm_grant.task`, which is
+what stops the same payment asked twice sharing one grant. garmd records it on
+the ledger row as the `task_id` tag, whether the grant verified or not, and
+checks nothing about it: the thing that knows which task is being decided is
+the caller that opened it, and a check here would have nothing to compare
+against but itself. What matters from this side is that a claim garmd does not
+read cannot fail a grant.
+
 Going the other way, the NATS hop carries `Garm-Invocation`: what the caller
 asserts — subject and kind, the delegation chain, tenant, correlation id, the
 absolute deadline, and the same ledger row id as `call_id` — so a tool learns

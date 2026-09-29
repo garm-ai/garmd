@@ -30,6 +30,20 @@ type grantClaims struct {
 	// Material is the digest over the values the human saw.
 	Material string
 
+	// Task is the task the approval was given ON, when the STS minted it for
+	// one (cards-and-tasks design §7). It is what stops two tasks with the
+	// same material — the same payment asked twice — sharing a grant.
+	//
+	// **This verifier does not check it, and that is the design.** The thing
+	// that knows which task is being decided is the caller that opened it —
+	// the tasks tool, comparing this claim against the row it stored — and a
+	// check here would have nothing to compare against but itself. What garmd
+	// owes the claim is the RECORD: it reaches the ledger row as a tag, so
+	// "which calls ran under task X" is answerable afterwards. A claim garmd
+	// does not read must not fail a grant either, which is what the accepting
+	// test in verify_test.go pins.
+	Task string
+
 	// Approver is who clicked, and what authority they held. Checked against
 	// the tool's approver_min_clearance and approver_compartments — the tool
 	// says how senior an approver must be, and the grant says how senior this
@@ -58,14 +72,19 @@ func parseGrantClaims(payload []byte) (*grantClaims, error) {
 	_, hasAct := raw["act"]
 
 	c := &grantClaims{
-		Issuer:               str(raw, "iss"),
-		Audience:             strSlice(raw, "aud"),
-		ID:                   str(raw, "jti"),
-		IssuedAt:             unix(raw, "iat"),
-		Expires:              unix(raw, "exp"),
-		Tool:                 str(g, "tool"),
-		Subject:              str(g, "subject"),
-		Material:             str(g, "material"),
+		Issuer:   str(raw, "iss"),
+		Audience: strSlice(raw, "aud"),
+		ID:       str(raw, "jti"),
+		IssuedAt: unix(raw, "iat"),
+		Expires:  unix(raw, "exp"),
+		Tool:     str(g, "tool"),
+		Subject:  str(g, "subject"),
+		Material: str(g, "material"),
+		// The STS spells it `task`; `task_id` is the request field it is
+		// copied from. Both are read because the two spellings have appeared
+		// in the design record, and reading only one would make a grant's
+		// binding invisible on whichever day the other arrived.
+		Task:                 firstOf(g, "task", "task_id"),
 		Approver:             str(g, "approver"),
 		ApproverClearance:    str(g, "approver_clearance"),
 		ApproverCompartments: strSlice(g, "approver_compartments"),
@@ -75,6 +94,16 @@ func parseGrantClaims(payload []byte) (*grantClaims, error) {
 }
 
 // checkShape is everything that does not need the request.
+// firstOf returns the first of these claims that carries a non-empty string.
+func firstOf(m map[string]any, names ...string) string {
+	for _, n := range names {
+		if s := str(m, n); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 func (v *Verifier) checkShape(c *grantClaims, p *toolplane.Principal, t toolplane.ToolDef) error {
 	// A delegated identity cannot approve. This is what structurally prevents
 	// an agent approving the destructive action it is about to take — not a
