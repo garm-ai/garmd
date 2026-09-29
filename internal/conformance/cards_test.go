@@ -293,6 +293,47 @@ func TestCardConformance(t *testing.T) {
 			absent:   []string{"adverse-media-hit", "Compliance"},
 		},
 
+		// A Section is a floor for its children, per call. The endpoint is
+		// INTERNAL and the child clears it, so floor 1 has nothing to say —
+		// and a reader who cannot see the heading would be shown what sat
+		// under it. Lint C8 checks this on a TEMPLATE; a card an override
+		// built in Go has none, and it reaches a viewer all the same.
+		"a child labelled below its section refuses the whole card": {
+			clearance: toolv1.Clearance_CLEARANCE_RESTRICTED, compartments: []string{"financial"},
+			procedure: approvalCard,
+			card: `{"kind": "TASK", "title": "Approve", "state": "OPEN", "body": [
+        {"section": {"title": "Compliance", "elements": [
+          {"text": {"text": "adverse-media-hit"}, "access": {"clearance": "CLEARANCE_INTERNAL"}}
+        ]},
+         "access": {"clearance": "CLEARANCE_RESTRICTED", "compartments": ["financial"]}}
+      ]}`,
+			code:        "internal",
+			errorKind:   toolplane.ErrorKindCardInvalid,
+			errorDetail: "card_invalid: label_below_section: body[0].elements[0]",
+		},
+
+		// The case the rule exists to PERMIT: a child labelled higher than
+		// its section — one fact inside a compliance section that only the
+		// head of compliance sees. Served, and withheld from whoever does not
+		// reach it.
+		"a child labelled above its section is projected, not refused": {
+			clearance: toolv1.Clearance_CLEARANCE_RESTRICTED, compartments: []string{"financial"},
+			procedure: approvalCard,
+			card: `{"kind": "TASK", "title": "Approve", "state": "OPEN", "body": [
+        {"section": {"title": "Context", "elements": [
+          {"text": {"text": "beneficiary-is-acme"},
+           "access": {"clearance": "CLEARANCE_RESTRICTED", "compartments": ["financial"]}},
+          {"text": {"text": "adverse-media-hit"},
+           "access": {"clearance": "CLEARANCE_RESTRICTED",
+                      "compartments": ["financial", "compliance"]}}
+        ]},
+         "access": {"clearance": "CLEARANCE_RESTRICTED", "compartments": ["financial"]}}
+      ]}`,
+			withheld: []string{"body[0].elements[1]"},
+			present:  []string{"beneficiary-is-acme", "Context"},
+			absent:   []string{"adverse-media-hit"},
+		},
+
 		// Floor 1. The whole card, to an approver who reaches every label in
 		// it: the refusal is not about this viewer, it is about a card built
 		// against a policy nobody checked.

@@ -650,8 +650,9 @@ the new shapes.
 one. `internal/conformance/cards_test.go` states the cards-and-tasks design's
 §12 garmd rows declaratively — a fact at `RESTRICTED + [financial]` seen by two
 personas over one endpoint, a `Section` with a withheld child and one with
-none left, floor 1's refusal with the path on the ledger row, a card whose own
-label the viewer misses, and a `PERSON` tool absent from an `AGENT` listing.
+none left, a child labelled below its section and one labelled above it, floor
+1's refusal with the path on the ledger row, a card whose own label the viewer
+misses, and a `PERSON` tool absent from an `AGENT` listing.
 It needs nothing running because both sides of the agreement are in the
 repository: the contract (a card's `access`, a tool's `audience`) as fixtures
 under `testdata`, and this daemon's reading of it. The minter suite is behind
