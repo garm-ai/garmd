@@ -87,25 +87,50 @@ jobs:
       # A catalogue crosses that line as DATA, loaded at boot — never as an
       # import. This is the inversion the whole architecture buys: garmd's
       # build sees no tool protos at all.
+      #
+      # Same fail-closed shape as the minter check above, and for the same
+      # reason: a `go list` that fails inside an `if` condition is swallowed
+      # and reads as a clean check. Build deps only (no -test) because the
+      # constraint is on the BUILD — but under both tag sets, because a
+      # tagged non-test file is invisible to an untagged list.
       - name: no dependency on any tool repository
         run: |
-          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/(examples|tools|agent)'; then
-            echo "::error::garmd build-depends on a tool repository; a catalogue is data, not an import" >&2
-            exit 1
-          fi
-          echo "clean: garmd depends on no tool repository"
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/(examples|tools|agent)'; then
+              echo "::error::garmd build-depends on a tool repository; a catalogue is data, not an import (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: garmd depends on no tool repository, untagged or under -tags conformance"
 
       # garmd does not know about agents. An agent's manifest is bytes it
       # carries unread (see internal/catalogue/agentblind_test.go). Since garm
       # v0.14 the agent contracts live in the garm module itself, so the
       # boundary above cannot see them; this one can, tests included.
+      #
+      # Tests included (-test) and both tag sets, exactly as the minter check:
+      # the agent-blind tests are the files most tempted to import the
+      # contract they prove is never read, and conformance_test.go is behind
+      # a build tag an untagged list cannot see.
       - name: no dependency on the agent contracts
         run: |
-          if go list -deps -test ./... 2>/dev/null | grep -E 'garm-ai/garm/contracts/garm/agent'; then
-            echo "::error::garmd reaches the agent contracts; it must stay agent-blind" >&2
-            exit 1
-          fi
-          echo "clean: garmd is agent-blind"
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps -test ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/garm/contracts/garm/agent'; then
+              echo "::error::garmd reaches the agent contracts; it must stay agent-blind (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: garmd is agent-blind, untagged or under -tags conformance"
 
       # The embedded NATS server is a TEST dependency and must stay one.
       #
@@ -126,25 +151,47 @@ jobs:
       # internal/catalogue/s3.go's S3API interface is two read methods wide, so
       # a change that gave garmd the ability to WRITE to an object store would
       # have to widen it in a diff someone reads.
+      #
+      # Deliberately WITHOUT -test: the whole point is that the broker is a
+      # test dependency, so a list that included test imports would fail on
+      # the exact arrangement this check exists to permit. Fail-closed shape
+      # and both tag sets as above.
       - name: the broker and the storage clients stay out of the build
         run: |
-          if go list -deps ./... 2>/dev/null | grep -E 'nats-server|go-duckdb|minio-go'; then
-            echo "::error::garmd build-depends on an embedded broker or a storage client" >&2
-            exit 1
-          fi
-          echo "clean: the embedded server is test-only and no storage client is linked"
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'nats-server|go-duckdb|minio-go'; then
+              echo "::error::garmd build-depends on an embedded broker or a storage client (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: the embedded server is test-only and no storage client is linked, untagged or under -tags conformance"
 
       # The tool-side runtime is what a tool service imports. A daemon
       # importing it would have the dependency backwards, and would drag the
       # enforcing side into a consumer's graph the first time anyone reused
       # a type.
+      #
+      # Fail-closed shape and both tag sets as above; build deps only, since
+      # the boundary is about what the daemon links.
       - name: no dependency on the tool runtime
         run: |
-          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/tool-(go|python)'; then
-            echo "::error::garmd depends on the tool-side runtime; that inverts the boundary" >&2
-            exit 1
-          fi
-          echo "clean: garmd depends on no tool runtime"
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/tool-(go|python)'; then
+              echo "::error::garmd depends on the tool-side runtime; that inverts the boundary (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: garmd depends on no tool runtime, untagged or under -tags conformance"
 
   conformance:
     name: identity conformance (sts)

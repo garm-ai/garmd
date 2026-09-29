@@ -12,7 +12,9 @@
         "kind": "PRINCIPAL_KIND_USER",
         "clearance": "CLEARANCE_RESTRICTED",
         "compartments": ["financial", "pii-contact"],
-        "verbs": ["VERB_READ", "VERB_WRITE"]
+        "verbs": ["VERB_READ", "VERB_WRITE"],
+        "tenant": "bank",
+        "chain": ["user:alice"]
       }
     },
     {
@@ -24,7 +26,9 @@
         "kind": "PRINCIPAL_KIND_USER",
         "clearance": "CLEARANCE_INTERNAL",
         "compartments": ["pii-contact"],
-        "verbs": ["VERB_READ"]
+        "verbs": ["VERB_READ"],
+        "tenant": "bank",
+        "chain": ["user:bob"]
       }
     },
     {
@@ -36,7 +40,9 @@
         "kind": "PRINCIPAL_KIND_USER",
         "clearance": "CLEARANCE_INTERNAL",
         "compartments": ["pii-contact"],
-        "verbs": ["VERB_READ"]
+        "verbs": ["VERB_READ"],
+        "tenant": "bank",
+        "chain": ["user:bob", "agent:triage-bot"]
       }
     },
     {
@@ -48,7 +54,9 @@
         "kind": "PRINCIPAL_KIND_USER",
         "clearance": "CLEARANCE_PUBLIC",
         "compartments": [],
-        "verbs": ["VERB_READ"]
+        "verbs": ["VERB_READ"],
+        "tenant": "bank",
+        "chain": ["user:alice", "agent:auditor-bot"]
       }
     },
     {

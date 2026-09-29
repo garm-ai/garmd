@@ -28,7 +28,8 @@ const minimal = `{
      "expect": {"subject": "user:alice", "kind": "PRINCIPAL_KIND_USER",
                 "clearance": "CLEARANCE_RESTRICTED",
                 "compartments": ["financial", "pii-contact"],
-                "verbs": ["VERB_READ", "VERB_WRITE"]}}
+                "verbs": ["VERB_READ", "VERB_WRITE"],
+                "tenant": "bank", "chain": ["user:alice"]}}
   ]
 }`
 
@@ -78,7 +79,7 @@ func TestLoadSuiteRejectsMalformedSuites(t *testing.T) {
 func TestLoadSuiteRejectsAnExpectedCompartmentItDoesNotDeclare(t *testing.T) {
 	body := `{"issuer":"i","audience":"garm","compartments":["support"],
 	          "cases":[{"name":"x","mint":{"user":"x"},
-	                    "expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC",
+	                    "expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC","tenant":"t","chain":["s"],
 	                              "compartments":["support","financial"]}}]}`
 	_, err := conformance.LoadSuite(write(t, body))
 	if err == nil {
@@ -94,7 +95,7 @@ func TestLoadSuiteRejectsAnExpectedCompartmentItDoesNotDeclare(t *testing.T) {
 func TestLoadSuiteRejectsADroppedCompartmentItDeclares(t *testing.T) {
 	body := `{"issuer":"i","audience":"garm","compartments":["support"],
 	          "cases":[{"name":"x","mint":{"user":"x"},
-	                    "expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC",
+	                    "expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC","tenant":"t","chain":["s"],
 	                              "dropped":["support"]}}]}`
 	if _, err := conformance.LoadSuite(write(t, body)); err == nil {
 		t.Fatal("accepted a suite expecting a declared compartment to be dropped")
@@ -144,8 +145,8 @@ func TestLoadSuiteRejectsAnExpectationWithNoSubject(t *testing.T) {
 	}
 }
 
-// A case must assert exactly one thing. Three kinds now (a folded
-// Principal, a refusal, an approval grant) and the "exactly one" rule is
+// A case must assert exactly one thing. Four kinds now (a folded
+// Principal, a refusal, an approval grant, an approval refusal) and the "exactly one" rule is
 // what keeps a malformed suite from failing OPEN: a case that asserts
 // nothing passes, and a suite of such cases reports success while checking
 // nothing.
@@ -205,6 +206,7 @@ func TestLoadSuiteValidatesAGrantCase(t *testing.T) {
 func TestLoadSuiteReadsAnExpectedExecution(t *testing.T) {
 	body := `{"name":"x","mint":{"a":"b"},
 		"expect":{"subject":"employee:jdoe","clearance":"CLEARANCE_INTERNAL",
+		          "tenant":"acme","chain":["employee:jdoe"],
 		          "execution":"runner:conformance-client"}}`
 	s, err := loadCase(t, body)
 	if err != nil {
@@ -319,4 +321,148 @@ func loadCaseErr(t *testing.T, caseJSON string) error {
 	t.Helper()
 	_, err := loadCase(t, caseJSON)
 	return err
+}
+
+// F12b. `tenant` and `chain` are asserted UNCONDITIONALLY by compare, so a
+// case that omits either is not asserting "any tenant" or "any chain" — it
+// is asserting nothing about the field that confines a caller to their own
+// organisation's data, or about every hop the fold walked. Same fail-open
+// shape as subject and clearance, and the same answer: refuse the load.
+func TestLoadSuiteRequiresTenantAndChainOnAnExpectation(t *testing.T) {
+	for name, tc := range map[string]struct{ body, names string }{
+		"no tenant": {`{"name":"x","mint":{"user":"x"},
+			"expect":{"subject":"user:alice","clearance":"CLEARANCE_PUBLIC",
+			          "chain":["user:alice"]}}`, "tenant"},
+		"no chain": {`{"name":"x","mint":{"user":"x"},
+			"expect":{"subject":"user:alice","clearance":"CLEARANCE_PUBLIC",
+			          "tenant":"bank"}}`, "chain"},
+		"empty chain": {`{"name":"x","mint":{"user":"x"},
+			"expect":{"subject":"user:alice","clearance":"CLEARANCE_PUBLIC",
+			          "tenant":"bank","chain":[]}}`, "chain"},
+		"chain does not start with the subject": {`{"name":"x","mint":{"user":"x"},
+			"expect":{"subject":"user:alice","clearance":"CLEARANCE_PUBLIC",
+			          "tenant":"bank","chain":["user:bob"]}}`, "chain"},
+		"a direct chain but an actor named": {`{"name":"x","mint":{"user":"x"},
+			"expect":{"subject":"user:alice","actor":"agent:bot","clearance":"CLEARANCE_PUBLIC",
+			          "tenant":"bank","chain":["user:alice"]}}`, "chain"},
+		"a delegated chain whose last hop is not the actor": {`{"name":"x","mint":{"user":"x"},
+			"expect":{"subject":"user:alice","actor":"agent:bot","clearance":"CLEARANCE_PUBLIC",
+			          "tenant":"bank","chain":["user:alice","agent:other"]}}`, "chain"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := loadCaseErr(t, tc.body)
+			if err == nil {
+				t.Fatal("LoadSuite accepted an expectation that would pass for any " + tc.names)
+			}
+			if !strings.Contains(err.Error(), tc.names) {
+				t.Fatalf("the error must name %s, got: %v", tc.names, err)
+			}
+		})
+	}
+}
+
+func TestLoadSuiteReadsTenantAndChain(t *testing.T) {
+	body := `{"name":"x","mint":{"a":"b"},
+		"expect":{"subject":"employee:jdoe","actor":"agent:order-assistant",
+		          "clearance":"CLEARANCE_INTERNAL","tenant":"acme",
+		          "chain":["employee:jdoe","agent:order-assistant"]}}`
+	s, err := loadCase(t, body)
+	if err != nil {
+		t.Fatalf("LoadSuite refused a case naming tenant and chain: %v", err)
+	}
+	e := s.Cases[0].Expect
+	if e.Tenant != "acme" {
+		t.Fatalf("expect.tenant = %q, want acme", e.Tenant)
+	}
+	if len(e.Chain) != 2 || e.Chain[0] != "employee:jdoe" || e.Chain[1] != "agent:order-assistant" {
+		t.Fatalf("expect.chain = %v, want [employee:jdoe agent:order-assistant]", e.Chain)
+	}
+}
+
+// F12a. A grantError case drives POST /approve and asserts the STS REFUSES.
+// It carries no mint params and no tool declaration — there is no grant to
+// judge — so its own required fields are checked instead, and for the same
+// reason a grant case's are: a refusal case is satisfied by ANY refusal, so
+// the request must at least be well-formed enough that the refusal is for
+// the reason the case names rather than for a field it forgot.
+func TestLoadSuiteValidatesAGrantErrorCase(t *testing.T) {
+	for name, body := range map[string]string{
+		"a customer identity as approver": `{"name":"x","grantError":{"tool":"payments.v1.initiate_payment",
+			"subject":"customer:C-8123","approver":"customer:C-8123","approverClearance":"RESTRICTED",
+			"material":{"amount_minor_units":"25000"}}}`,
+		"a delegated approver": `{"name":"x","grantError":{"tool":"a.b","subject":"customer:C",
+			"approver":"jdoe","approverClearance":"RESTRICTED","approverActor":"agent:order-assistant"}}`,
+		// The whole point of this one is that the path is malformed, so the
+		// loader must NOT apply the grant case's ValidPath rule here.
+		"a malformed material path": `{"name":"x","grantError":{"tool":"a.b","subject":"customer:C",
+			"approver":"jdoe","approverClearance":"RESTRICTED","material":{"amount=minor":"25000"}}}`,
+		"no client assertion": `{"name":"x","grantError":{"tool":"a.b","subject":"customer:C",
+			"approver":"jdoe","approverClearance":"RESTRICTED","omitClientAssertion":true}}`,
+	} {
+		t.Run("loads: "+name, func(t *testing.T) {
+			s, err := loadCase(t, body)
+			if err != nil {
+				t.Fatalf("LoadSuite refused a well-formed grantError case: %v", err)
+			}
+			if s.Cases[0].GrantError == nil {
+				t.Fatal("the case loaded with no grantError block")
+			}
+		})
+	}
+
+	const declared = `"approverClearance":"RESTRICTED",`
+	for name, tc := range map[string]struct{ body, names string }{
+		"no tool":     {`{"name":"x","grantError":{` + declared + `"subject":"customer:C","approver":"jdoe"}}`, "tool"},
+		"no subject":  {`{"name":"x","grantError":{` + declared + `"tool":"a.b","approver":"jdoe"}}`, "subject"},
+		"no approver": {`{"name":"x","grantError":{` + declared + `"tool":"a.b","subject":"customer:C"}}`, "approver"},
+		// A misspelled clearance asks the upstream IdP for its default, and
+		// the STS then refuses "no usable authority" — a refusal, so the
+		// case passes, for a reason that has nothing to do with its name.
+		"misspelled approverClearance": {`{"name":"x","grantError":{"approverClearance":"RESTRICTD",
+			"tool":"a.b","subject":"customer:C","approver":"jdoe"}}`, "approverClearance"},
+		"no approverClearance": {`{"name":"x","grantError":{"tool":"a.b","subject":"customer:C","approver":"jdoe"}}`, "approverClearance"},
+		// DisallowUnknownFields: a grant case's field on a grantError case
+		// is a case that says it checks something it cannot.
+		"expectApprover on a refusal case": {`{"name":"x","grantError":{` + declared +
+			`"tool":"a.b","subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe"}}`, "expectApprover"},
+		// And the mirror: a refusal knob on a grant case is a case that
+		// would fail at mint for a reason it never states.
+		"approverActor on a grant case": {`{"name":"x","grant":{"tool":"a.b","subject":"customer:C",
+			"approver":"jdoe","expectApprover":"employee:jdoe","approverClearance":"RESTRICTED",
+			"toolApproverMinClearance":"RESTRICTED","toolMaxGrantAgeSeconds":900,
+			"approverActor":"agent:bot"}}`, "approverActor"},
+		"omitClientAssertion on a grant case": {`{"name":"x","grant":{"tool":"a.b","subject":"customer:C",
+			"approver":"jdoe","expectApprover":"employee:jdoe","approverClearance":"RESTRICTED",
+			"toolApproverMinClearance":"RESTRICTED","toolMaxGrantAgeSeconds":900,
+			"omitClientAssertion":true}}`, "omitClientAssertion"},
+	} {
+		t.Run("refuses: "+name, func(t *testing.T) {
+			err := loadCaseErr(t, tc.body)
+			if err == nil {
+				t.Fatalf("LoadSuite accepted a case with %s", name)
+			}
+			if !strings.Contains(err.Error(), tc.names) {
+				t.Fatalf("the error must name %s, got: %v", tc.names, err)
+			}
+		})
+	}
+}
+
+// The "exactly one" rule extends to the fourth kind.
+func TestLoadSuiteRequiresExactlyOneAssertionWithGrantError(t *testing.T) {
+	const ge = `"grantError":{"tool":"a.b","subject":"customer:C","approver":"jdoe","approverClearance":"RESTRICTED"}`
+	for name, body := range map[string]string{
+		"grantError and grant": `{"name":"x",` + ge + `,
+			"grant":{"tool":"a.b","subject":"customer:C","approver":"jdoe","expectApprover":"employee:jdoe",
+			         "approverClearance":"RESTRICTED","toolApproverMinClearance":"RESTRICTED","toolMaxGrantAgeSeconds":900}}`,
+		"grantError and mintError": `{"name":"x","mint":{"a":"b"},"mintError":true,` + ge + `}`,
+		"grantError and expect": `{"name":"x","mint":{"a":"b"},` + ge + `,
+			"expect":{"subject":"s","clearance":"CLEARANCE_PUBLIC","tenant":"t","chain":["s"]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := loadCaseErr(t, body); err == nil {
+				t.Fatal("LoadSuite accepted a case asserting several things")
+			}
+		})
+	}
 }

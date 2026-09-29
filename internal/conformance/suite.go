@@ -44,7 +44,7 @@ type Case struct {
 	Mint map[string]string `json:"mint"`
 
 	// Expect is the Principal the fold must produce. Exactly one of Expect,
-	// MintError and Grant is set.
+	// MintError, Grant and GrantError is set.
 	Expect *Expect `json:"expect"`
 
 	// MintError asserts the minter REFUSES. An entitlement the minter
@@ -56,8 +56,18 @@ type Case struct {
 	// this daemon's own verifier accepts it. A grant case drives a
 	// different endpoint from Mint and carries no mint params.
 	//
-	// Exactly one of Expect, MintError and Grant is set.
+	// Exactly one of Expect, MintError, Grant and GrantError is set.
 	Grant *Grant `json:"grant"`
+
+	// GrantError asks the minter's APPROVAL endpoint for a grant and asserts
+	// that it REFUSES — the counterpart of MintError for POST /approve. A
+	// customer approving, a delegated identity approving, a malformed
+	// material path, a calling service that never authenticated: each is a
+	// refusal the STS owes a caller, and each is unchecked by a suite that
+	// can only say "approve this".
+	//
+	// Exactly one of Expect, MintError, Grant and GrantError is set.
+	GrantError *GrantError `json:"grantError"`
 }
 
 // Expect is a folded Principal, in claim spellings rather than enum values
@@ -90,6 +100,46 @@ type Expect struct {
 	// all, which is exactly what every exchange-1 case needs to say and
 	// what would otherwise go unchecked.
 	Execution string `json:"execution"`
+
+	// Tenant is the `tenant` claim the fold carried through. Asserted
+	// UNCONDITIONALLY and required at load: it is what confines a caller to
+	// their own organisation's data, and on the governed door it arrives as
+	// a form field the runner supplies rather than inside a verified subject
+	// token — which is exactly the kind of value a drift check must pin.
+	Tenant string `json:"tenant"`
+
+	// Chain is every hop the fold walked, IN ORDER: Chain[0] is the subject
+	// and the last entry is the actor (for a direct token the chain is the
+	// subject alone). Asserted unconditionally and required at load, and
+	// compared as an ordered list rather than a set — a chain is the record
+	// of who acted for whom, and reversing it is a different fact.
+	Chain []string `json:"chain"`
+}
+
+// ApprovalRequest is one call to the approval endpoint: the approver as
+// the upstream IdP is asked to mint them, and the request body itself. It
+// is what a GrantMinter is handed, and both Grant and GrantError produce
+// one — a grant case asks for it to succeed, a grantError case for it to
+// be refused.
+type ApprovalRequest struct {
+	Approver             string
+	ApproverTenant       string
+	ApproverClearance    string
+	ApproverCompartments []string
+
+	// ApproverActor, when set, asks the upstream IdP to mint the approver's
+	// token WITH an `act` chain naming this actor — a delegated identity,
+	// which the STS refuses as an approver. Only a refusal case sets it.
+	ApproverActor string
+
+	Tool     string
+	Subject  string
+	Material map[string]string
+
+	// OmitClientAssertion sends the request with no client_assertion at
+	// all: the calling service never authenticates. Only a refusal case
+	// sets it.
+	OmitClientAssertion bool
 }
 
 // Grant is one approval case: what to ask the approval endpoint for, and
@@ -118,6 +168,62 @@ type Grant struct {
 	// token's sub and the issuer's configured kind — so it is the one worth
 	// asserting separately from what the verifier already checks.
 	ExpectApprover string `json:"expectApprover"`
+}
+
+// Request is the approval call a grant case makes. Never delegated and
+// never unauthenticated: those knobs exist only on GrantError, and a grant
+// case's JSON cannot even name them.
+func (g Grant) Request() ApprovalRequest {
+	return ApprovalRequest{
+		Approver:             g.Approver,
+		ApproverTenant:       g.ApproverTenant,
+		ApproverClearance:    g.ApproverClearance,
+		ApproverCompartments: g.ApproverCompartments,
+		Tool:                 g.Tool,
+		Subject:              g.Subject,
+		Material:             g.Material,
+	}
+}
+
+// GrantError is one approval REFUSAL case: what to ask the approval
+// endpoint for, such that it must say no.
+//
+// It carries the approver and the request as Grant does, plus the two
+// knobs that make a request refusable — a delegated approver and an
+// omitted client_assertion — and NO tool declaration or expected approver,
+// because there is no grant to judge. A material path here is deliberately
+// NOT validated at load: a malformed one is the point of the case that
+// carries it.
+//
+// The refusal it is satisfied by is exactly one: the STS's own opaque
+// `400 {"error":"access_denied"}`. See runGrantErrorCase.
+type GrantError struct {
+	Approver             string   `json:"approver"`
+	ApproverTenant       string   `json:"approverTenant"`
+	ApproverClearance    string   `json:"approverClearance"`
+	ApproverCompartments []string `json:"approverCompartments"`
+	ApproverActor        string   `json:"approverActor"`
+
+	Tool     string            `json:"tool"`
+	Subject  string            `json:"subject"`
+	Material map[string]string `json:"material"`
+
+	OmitClientAssertion bool `json:"omitClientAssertion"`
+}
+
+// Request is the approval call a refusal case makes, exactly as declared.
+func (g GrantError) Request() ApprovalRequest {
+	return ApprovalRequest{
+		Approver:             g.Approver,
+		ApproverTenant:       g.ApproverTenant,
+		ApproverClearance:    g.ApproverClearance,
+		ApproverCompartments: g.ApproverCompartments,
+		ApproverActor:        g.ApproverActor,
+		Tool:                 g.Tool,
+		Subject:              g.Subject,
+		Material:             g.Material,
+		OmitClientAssertion:  g.OmitClientAssertion,
+	}
 }
 
 // LoadSuite reads and validates a suite file.
@@ -161,15 +267,24 @@ func LoadSuite(path string) (*Suite, error) {
 		if c.Grant != nil {
 			asserted++
 		}
+		if c.GrantError != nil {
+			asserted++
+		}
 		if asserted != 1 {
 			return nil, fmt.Errorf("conformance: %s: case %q asserts %d things; it must set "+
-				"exactly one of expect, mintError and grant", path, c.Name, asserted)
+				"exactly one of expect, mintError, grant and grantError", path, c.Name, asserted)
 		}
-		// A grant case drives the APPROVAL endpoint, not the token one, so
-		// the "asks the minter for nothing" rule below does not apply to it
-		// — its own required fields are checked instead.
+		// A grant or grantError case drives the APPROVAL endpoint, not the
+		// token one, so the "asks the minter for nothing" rule below does
+		// not apply to it — its own required fields are checked instead.
 		if c.Grant != nil {
 			if err := validateGrant(path, c.Name, c.Grant); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if c.GrantError != nil {
+			if err := validateGrantError(path, c.Name, c.GrantError); err != nil {
 				return nil, err
 			}
 			continue
@@ -209,8 +324,71 @@ func LoadSuite(path string) (*Suite, error) {
 					"but the suite declares it", path, c.Name, name)
 			}
 		}
+		if err := validateTenantAndChain(path, c.Name, c.Expect); err != nil {
+			return nil, err
+		}
 	}
 	return &s, nil
+}
+
+// validateTenantAndChain refuses an expectation that would pass for any
+// tenant or any chain. Both are asserted unconditionally by compare, so an
+// omitted one is not "don't care" — it is a case asserting the fold carried
+// no tenant and walked no hops, which no verified token produces, and the
+// case would then fail on every run for a reason it never states. The chain
+// is also checked against the subject and actor the same case names, since
+// the fold derives both from it: a case that disagrees with itself is wrong
+// before a token is ever minted.
+func validateTenantAndChain(path, name string, e *Expect) error {
+	if e.Tenant == "" {
+		return fmt.Errorf("conformance: %s: case %q expects no tenant; a fold always "+
+			"carries one, and the tenant is what confines a caller to their own "+
+			"organisation's data — it must be asserted", path, name)
+	}
+	if len(e.Chain) == 0 {
+		return fmt.Errorf("conformance: %s: case %q expects no chain; a fold always walks "+
+			"at least the subject, so the chain must be asserted, in order", path, name)
+	}
+	if e.Chain[0] != e.Subject {
+		return fmt.Errorf("conformance: %s: case %q: chain[0] is %q but subject is %q; "+
+			"the chain starts with the subject", path, name, e.Chain[0], e.Subject)
+	}
+	last := e.Chain[len(e.Chain)-1]
+	if len(e.Chain) == 1 && e.Actor != "" {
+		return fmt.Errorf("conformance: %s: case %q: chain names only the subject but "+
+			"actor is %q; a delegated token's chain ends with the actor", path, name, e.Actor)
+	}
+	if len(e.Chain) > 1 && last != e.Actor {
+		return fmt.Errorf("conformance: %s: case %q: chain ends with %q but actor is %q; "+
+			"the last hop of the chain is the actor", path, name, last, e.Actor)
+	}
+	return nil
+}
+
+// validateGrantError refuses a refusal case that could be refused for a
+// reason it never names. A refusal case is satisfied by ANY opaque denial,
+// which is inherent to asserting "no" — mintError has the same shape — so
+// what the loader can do is insist the request is well-formed on every
+// axis the case does not claim to be testing: the tool, the subject and
+// the approver are present, and the approver's clearance is a real one, so
+// that "no usable authority" is never the refusal a misspelling earns.
+func validateGrantError(path, name string, g *GrantError) error {
+	for _, f := range []struct{ field, value string }{
+		{"tool", g.Tool},
+		{"subject", g.Subject},
+		{"approver", g.Approver},
+	} {
+		if f.value == "" {
+			return fmt.Errorf("conformance: %s: grantError case %q has no %s", path, name, f.field)
+		}
+	}
+	if _, err := ClearanceValue(g.ApproverClearance); err != nil {
+		return fmt.Errorf("conformance: %s: grantError case %q: approverClearance: %w "+
+			"— an approver minted with no real clearance is refused for asserting no "+
+			"authority, which would satisfy this case for the wrong reason",
+			path, name, err)
+	}
+	return nil
 }
 
 // validateGrant refuses a grant case that would assert nothing. Same

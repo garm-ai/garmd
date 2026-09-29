@@ -332,22 +332,26 @@ type grantResponse struct {
 	ExpiresIn int64  `json:"expires_in"`
 }
 
-// Grant drives POST /approve: a JSON body carrying the calling service's
+// Approve drives POST /approve: a JSON body carrying the calling service's
 // client_assertion and the approval request, and the APPROVER'S own bearer
-// in the Authorization header.
+// in the Authorization header. Both a grant case and a grantError case go
+// through here; the request says which it is.
 //
 // The approver's token is fetched from the upstream IdP first, with the
 // clearance and compartments the case declares, because the issuer RECORDS
 // the approver's authority rather than resolving it — so the case has to
-// say what that authority is, and the only place to put it is the token.
+// say what that authority is, and the only place to put it is the token. A
+// case naming an ApproverActor asks the upstream for a token carrying an
+// `act` chain (devkit's ?act= form), which is how a refusal case presents a
+// delegated identity as the approver.
 //
 // A non-200 from the approval endpoint is a *RefusalError, exactly as
 // Token's contract requires; a failure fetching the approver's token is an
 // ordinary wrapped error, because a case that never reached the service
 // under test asserts nothing about it.
-func (m FormMinter) Grant(ctx context.Context, g Grant) (string, error) {
+func (m FormMinter) Approve(ctx context.Context, g ApprovalRequest) (string, error) {
 	if m.UpstreamURL == "" {
-		return "", fmt.Errorf("conformance: a grant case needs an approver's token and " +
+		return "", fmt.Errorf("conformance: an approval case needs an approver's token and " +
 			"FormMinter has no UpstreamURL configured")
 	}
 	q := url.Values{}
@@ -361,15 +365,14 @@ func (m FormMinter) Grant(ctx context.Context, g Grant) (string, error) {
 	if len(g.ApproverCompartments) > 0 {
 		q.Set("compartments", strings.Join(g.ApproverCompartments, ","))
 	}
+	if g.ApproverActor != "" {
+		q.Set("act", g.ApproverActor)
+	}
 	bearer, err := m.fetchUpstreamToken(ctx, q)
 	if err != nil {
 		return "", fmt.Errorf("conformance: fetching the approver's token from the upstream IdP: %w", err)
 	}
 
-	assertion, err := m.clientAssertion()
-	if err != nil {
-		return "", err
-	}
 	// Never nil: the approval endpoint digests what it is given, and `null`
 	// where an object belongs is a request shape nothing on either side has
 	// a reason to accept.
@@ -377,13 +380,23 @@ func (m FormMinter) Grant(ctx context.Context, g Grant) (string, error) {
 	if material == nil {
 		material = map[string]string{}
 	}
-	body, err := json.Marshal(map[string]any{
-		"client_assertion":      assertion,
+	fields := map[string]any{
 		"client_assertion_type": clientAssertionTypeJWTBearer,
 		"tool":                  g.Tool,
 		"subject":               g.Subject,
 		"material":              material,
-	})
+	}
+	// Omitted means ABSENT — no key at all — not an empty string. The type
+	// field stays, so the refusal such a case earns is about the missing
+	// assertion and not about a missing type.
+	if !g.OmitClientAssertion {
+		assertion, err := m.clientAssertion()
+		if err != nil {
+			return "", err
+		}
+		fields["client_assertion"] = assertion
+	}
+	body, err := json.Marshal(fields)
 	if err != nil {
 		return "", fmt.Errorf("conformance: encoding the approval request: %w", err)
 	}

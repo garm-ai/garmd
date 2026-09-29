@@ -340,16 +340,20 @@ CI asserts it from both sides.
 The seam between minting and verifying is a cross-repository CI check, not a
 same-process test. `internal/conformance` loads a suite of cases from
 `internal/conformance/suites/sts.json`, drives the running service over HTTP
-per case, and checks the answer with this repository's own code. Three kinds
+per case, and checks the answer with this repository's own code. Four kinds
 of case, and each asserts exactly one thing:
 
 - **`expect`** — the STS's `POST /token` mints, `internal/authn` verifies and
   folds, and the resulting `Principal` is compared field by field. `subject`,
-  `actor`, `clearance`, `compartments`, `verbs`, `toolSets`, `dropped` and
-  `execution` are all asserted whether the case names them or not, so a case
-  that omits `execution` is asserting the token carried no `exec` claim at
-  all — which is what pins the runner's provenance to the governed door and
-  nowhere else.
+  `actor`, `clearance`, `compartments`, `verbs`, `toolSets`, `dropped`,
+  `execution`, `tenant` and `chain` are all asserted whether the case names
+  them or not, so a case that omits `execution` is asserting the token
+  carried no `exec` claim at all — which is what pins the runner's
+  provenance to the governed door and nowhere else. `tenant` and `chain`
+  are required at load, because a fold always produces both: the tenant is
+  what confines a caller to their own organisation's data, and the chain is
+  every hop the fold walked, compared in order (`chain[0]` is the subject,
+  the last hop the actor).
 - **`mintError`** — the STS REFUSES. Only a `*RefusalError` satisfies it: a
   dead port asserts nothing, and accepting one would make a suite of
   refusal cases pass against a service that was never running.
@@ -358,6 +362,18 @@ of case, and each asserts exactly one thing:
   direct assertion that the digest is over the values the issuer was given
   and that the approver recorded is the one it derived from the verified
   token.
+- **`grantError`** — the STS's `POST /approve` REFUSES, and refuses the one
+  way its contract allows: the opaque `400 {"error":"access_denied"}`. A
+  500, a 405, or a 400 whose body names the reason all fail the case — the
+  first two because a crashed or misrouted service is not a refusal, the
+  last because a reason in the response is the enumeration oracle the
+  opaque body exists to prevent. `sts.json` carries four: a customer
+  identity presented as the approver, an approver whose token carries an
+  `act` chain (an agent approving its own destructive call), a material
+  path that would forge a separator in the digest, and a calling service
+  that sent no `client_assertion`. The two knobs a refusal case can turn —
+  `approverActor` and `omitClientAssertion` — do not exist on a `grant`
+  case at all; the loader refuses them there.
 
 The `conformance` job in `.github/workflows/ci.yml` starts devkit as the
 upstream IdP, starts the STS trusting it, runs the suite and fails the build
@@ -366,20 +382,33 @@ are `checkout`'d and run as processes, never imported, and the `boundaries`
 job re-asserts `go list -deps -test ./...` names neither `garm-ai/devkit`
 nor `garm-ai/sts`, under both tag sets.
 
-**The STS is checked out at the `v0.3.0` tag.** The endpoints the last three
-cases drive and the deploy fixtures they read first shipped there; an older
+**The STS is checked out at the `v0.3.0` tag.** The endpoints the exchange-2
+and `/approve` cases drive and the deploy fixtures they read first shipped
+there; an older
 `sts` refuses to start on the `approve:` block this job writes. A tag, not a
 branch, on purpose: a branch ref would make this job follow whatever lands on
 the STS side, and a case could then be made to pass by an edit there rather
 than by the two sides agreeing. The tag is bumped by hand when the suite grows
 a case that needs a newer STS.
 
-What remains unguarded, in seven parts:
+What remains unguarded, in five parts:
 
 **The suite covers the cases in `sts.json` and no others**, so a claim shape
 only a different persona or a different tool declaration would exercise is
-still unchecked. `devkit.json` is still shipped beside it and is no longer
-driven by any job.
+still unchecked. Two rows of the STS's `/approve` refusal table are out of
+this job's reach by construction: "the approver's issuer is not configured
+`kind: employee`" needs a second upstream issuer configured as `customer`,
+and devkit mints one fixed `iss` that the STS's config may name once — so
+the suite's customer case exercises the neighbouring row instead (a
+`customer:` subject from an employee-kind issuer, refused rather than
+repaired), and the issuer-kind row itself is pinned only by `sts`'s own
+`TestApproveRefusesANonEmployeeApprover`. Nothing here asserts that two
+grants carry different `jti`s either — single-use is `internal/grants`'s
+subject, and the harness's own replay cache is per-run. `devkit.json` is
+still shipped beside `sts.json` and is no longer driven by any job; its
+`tenant` expectations pin the `bank` default in devkit's
+`examples/personas.yaml`, so it runs against a devkit started with
+`--personas` and no `--tenant`.
 
 **A grant case checks the issuer's half of material binding and not
 garmd's.** `grants.Verifier.checkMaterial` re-extracts material values from
@@ -388,29 +417,6 @@ proto message and no descriptor, so the harness declares a `ToolDef` with no
 `MaterialFields` — which makes that check a no-op — and asserts the digest
 directly instead. Re-extraction from a real request is covered by
 `internal/grants`'s own tests, never by this job.
-
-**The suite format has no `/approve` REFUSAL kind.** `mintError` asserts that
-the token endpoint said no; there is no counterpart for the approval endpoint,
-so every refusal the STS owes a caller there is unchecked by this job: a
-customer-kind approver, an approver whose token carries an `act` chain (an
-agent approving its own destructive call), a malformed material path, a
-missing or wrong `client_assertion`. Each is pinned by `sts`'s own tests on
-its own side, which is exactly the arrangement this job exists because it
-cannot be trusted alone. Adding a `grantError` kind is the obvious shape and
-is post-MVP. Nothing here asserts that two grants carry different `jti`s
-either — single-use is `internal/grants`'s subject, and the harness's own
-replay cache is per-run.
-
-**`Expect` asserts neither the tenant nor the delegation chain.** It compares
-subject, actor, kind, clearance, compartments, verbs, tool sets, dropped
-compartments and execution — and `toolplane.Principal` carries more than
-that. The tenant is what confines a caller to their own organisation's data,
-and it became load-bearing on the governed door, where the runner supplies it
-as a form field rather than it arriving inside a verified subject token. The
-chain is every hop the fold walked. Both are minted and both are folded; a
-case cannot yet say what either should be. Post-MVP, and the reason it is
-listed here rather than fixed in passing is that `Chain` needs a shape
-decision in the suite format, not just a field.
 
 **The suites live in this repository.** `internal/conformance/suites/` holds
 `devkit.json` and `sts.json`. They were in the private `spec` repo, which made

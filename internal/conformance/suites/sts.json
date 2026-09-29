@@ -18,7 +18,9 @@
         "clearance": "CLEARANCE_INTERNAL",
         "compartments": ["pii-contact"],
         "verbs": ["VERB_READ"],
-        "toolSets": ["support"]
+        "toolSets": ["support"],
+        "tenant": "acme",
+        "chain": ["employee:jdoe", "agent:order-assistant"]
       }
     },
     {
@@ -48,7 +50,9 @@
         "compartments": ["pii-contact"],
         "verbs": ["VERB_READ"],
         "toolSets": ["support"],
-        "execution": "runner:conformance-client"
+        "execution": "runner:conformance-client",
+        "tenant": "acme",
+        "chain": ["employee:jdoe", "agent:order-assistant"]
       }
     },
     {
@@ -91,6 +95,71 @@
         "toolApproverCompartments": ["financial"],
         "toolMaxGrantAgeSeconds": 900,
         "expectApprover": "employee:jdoe"
+      }
+    },
+    {
+      "name": "approve: refused, a customer identity presented as the approver by an employee-kind issuer",
+      "grantError": {
+        "approver": "customer:C",
+        "approverTenant": "acme",
+        "approverClearance": "RESTRICTED",
+        "approverCompartments": ["financial"],
+        "tool": "payments.v1.initiate_payment",
+        "subject": "customer:C",
+        "material": {
+          "amount_minor_units": "25000",
+          "beneficiary_iban": "GB29NWBK60161331926819",
+          "currency_code": "GBP"
+        }
+      }
+    },
+    {
+      "name": "approve: refused, the approver's token carries an act chain (a delegated identity cannot approve)",
+      "grantError": {
+        "approver": "jdoe",
+        "approverTenant": "acme",
+        "approverClearance": "RESTRICTED",
+        "approverCompartments": ["financial"],
+        "approverActor": "agent:order-assistant",
+        "tool": "payments.v1.initiate_payment",
+        "subject": "employee:jdoe",
+        "material": {
+          "amount_minor_units": "25000",
+          "beneficiary_iban": "GB29NWBK60161331926819",
+          "currency_code": "GBP"
+        }
+      }
+    },
+    {
+      "name": "approve: refused, a material path that would forge a separator in the digest",
+      "grantError": {
+        "approver": "jdoe",
+        "approverTenant": "acme",
+        "approverClearance": "RESTRICTED",
+        "approverCompartments": ["financial"],
+        "tool": "payments.v1.initiate_payment",
+        "subject": "employee:jdoe",
+        "material": {
+          "amount_minor_units=beneficiary_iban": "25000",
+          "currency_code": "GBP"
+        }
+      }
+    },
+    {
+      "name": "approve: refused, the calling service sent no client_assertion",
+      "grantError": {
+        "approver": "jdoe",
+        "approverTenant": "acme",
+        "approverClearance": "RESTRICTED",
+        "approverCompartments": ["financial"],
+        "tool": "payments.v1.initiate_payment",
+        "subject": "employee:jdoe",
+        "material": {
+          "amount_minor_units": "25000",
+          "beneficiary_iban": "GB29NWBK60161331926819",
+          "currency_code": "GBP"
+        },
+        "omitClientAssertion": true
       }
     }
   ]

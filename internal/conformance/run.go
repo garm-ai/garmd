@@ -39,8 +39,12 @@ type Minter interface {
 // because a minter may implement the token endpoint and not the approval
 // one — devkit does — and a suite carrying a grant case against such a
 // minter must fail loudly rather than skip.
+//
+// Approve must report a refusal as a *RefusalError, exactly as Token does:
+// a grantError case asserts that the approval endpoint SAID NO, and an
+// endpoint that could not be reached said nothing.
 type GrantMinter interface {
-	Grant(ctx context.Context, g Grant) (string, error)
+	Approve(ctx context.Context, req ApprovalRequest) (string, error)
 }
 
 // RefusalError is a minter that answered and said no.
@@ -143,6 +147,9 @@ func runCase(
 	if c.Grant != nil {
 		return runGrantCase(ctx, c, m, s, jwksURL)
 	}
+	if c.GrantError != nil {
+		return runGrantErrorCase(ctx, c, m)
+	}
 	tok, mintErr := m.Token(ctx, c.Mint)
 	if c.MintError {
 		if mintErr == nil {
@@ -190,6 +197,16 @@ func compare(e *Expect, p *toolplane.Principal, dropped []string, reg *policy.Re
 	// silently.
 	if p.Execution != e.Execution {
 		bad = append(bad, fmt.Sprintf("execution: got %q want %q", p.Execution, e.Execution))
+	}
+	// Unconditional, and LoadSuite requires both, for the reason given on
+	// Expect: the tenant confines, and the chain is the record of who acted
+	// for whom. The chain is compared IN ORDER — not through diffSets — since
+	// a reversed chain names a different delegation.
+	if p.Tenant != e.Tenant {
+		bad = append(bad, fmt.Sprintf("tenant: got %q want %q", p.Tenant, e.Tenant))
+	}
+	if !slices.Equal(p.Chain, e.Chain) {
+		bad = append(bad, fmt.Sprintf("chain: got %v want %v", p.Chain, e.Chain))
 	}
 	// Kind is the one field left optional, and deliberately: it is
 	// attribution rather than authority, so a suite that does not name it is
@@ -328,7 +345,7 @@ func runGrantCase(ctx context.Context, c Case, m Minter, s *Suite, jwksURL strin
 	}
 	g := *c.Grant
 
-	raw, err := gm.Grant(ctx, g)
+	raw, err := gm.Approve(ctx, g.Request())
 	if err != nil {
 		return fmt.Errorf("minting the grant: %w", err)
 	}
@@ -378,6 +395,60 @@ func runGrantCase(ctx context.Context, c Case, m Minter, s *Suite, jwksURL strin
 		return fmt.Errorf("garm_grant.approver = %q, want %q", claims.Approver, g.ExpectApprover)
 	}
 	return nil
+}
+
+// runGrantErrorCase asks the approval endpoint for a grant the suite says
+// it must refuse, and is satisfied by exactly one answer: the STS's own
+// opaque `400 {"error":"access_denied"}`.
+//
+// Exactly one, and not "any non-200", for two reasons that pull the same
+// way. A refusal case pointed at a service that is crashing (500), or at
+// the wrong route (404, 405), would otherwise report ok while checking
+// nothing — the mintError lesson again. And the STS's contract is that
+// EVERY refusal is that one opaque body, with the reason on the log and
+// never in the response, so that the endpoint is not an enumeration oracle
+// for which tools exist and who may approve them; a body that names the
+// reason is a drift this case is well placed to catch.
+func runGrantErrorCase(ctx context.Context, c Case, m Minter) error {
+	gm, ok := m.(GrantMinter)
+	if !ok {
+		return fmt.Errorf("this case asks the approval endpoint to refuse and the configured " +
+			"minter shape cannot reach one; a grantError case against a token-only minter " +
+			"must fail rather than be skipped")
+	}
+	_, err := gm.Approve(ctx, c.GrantError.Request())
+	if err == nil {
+		return fmt.Errorf("the approval endpoint minted a grant, but the suite says it must refuse")
+	}
+	var refusal *RefusalError
+	if !errors.As(err, &refusal) {
+		return fmt.Errorf("the suite says the approval endpoint must refuse this, but it "+
+			"could not be reached at all — that asserts nothing: %w", err)
+	}
+	if refusal.Status != http.StatusBadRequest {
+		return fmt.Errorf("the approval endpoint answered %d, but every refusal it owes a "+
+			"caller is the one opaque 400; this is not the refusal the case asserts (body: %s)",
+			refusal.Status, refusal.Body)
+	}
+	if !isOpaqueDenial(refusal.Body) {
+		return fmt.Errorf("the approval endpoint answered 400 with %q, but a refusal is exactly "+
+			"{\"error\":\"access_denied\"} — a body saying more is an enumeration oracle, and one "+
+			"saying something else is not this endpoint's refusal", refusal.Body)
+	}
+	return nil
+}
+
+// isOpaqueDenial reports whether body is the STS's one refusal shape and
+// nothing more: a JSON object whose only member is error=access_denied.
+// Decoded rather than compared as a string so whitespace cannot fail it,
+// and required to be the ONLY member so a body that also names the reason
+// cannot pass it.
+func isOpaqueDenial(body string) bool {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		return false
+	}
+	return len(m) == 1 && m["error"] == "access_denied"
 }
 
 // grantClaimBody is the half of garm_grant this harness reads directly. The

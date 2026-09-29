@@ -535,7 +535,7 @@ func TestFormMinterGrantPostsTheApprovalRequest(t *testing.T) {
 		Audience: "https://sts.example/token", Key: key, UpstreamURL: s.upstream.URL,
 	}
 
-	got, err := m.Grant(context.Background(), grantCase())
+	got, err := m.Approve(context.Background(), grantCase().Request())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +584,7 @@ func TestFormMinterGrantAsksUpstreamForTheApproversAuthority(t *testing.T) {
 		BaseURL: s.sts.URL, ClientID: "conformance-client",
 		Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
 	}
-	if _, err := m.Grant(context.Background(), grantCase()); err != nil {
+	if _, err := m.Approve(context.Background(), grantCase().Request()); err != nil {
 		t.Fatal(err)
 	}
 	for k, want := range map[string]string{
@@ -604,7 +604,7 @@ func TestFormMinterGrantReportsARefusalAsARefusalError(t *testing.T) {
 	m := conformance.FormMinter{
 		BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
 	}
-	_, err := m.Grant(context.Background(), grantCase())
+	_, err := m.Approve(context.Background(), grantCase().Request())
 	var refusal *conformance.RefusalError
 	if !errors.As(err, &refusal) {
 		t.Fatalf("err = %v, want a *RefusalError", err)
@@ -622,7 +622,7 @@ func TestFormMinterGrantUpstreamFailureIsNotARefusal(t *testing.T) {
 	m := conformance.FormMinter{
 		BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
 	}
-	_, err := m.Grant(context.Background(), grantCase())
+	_, err := m.Approve(context.Background(), grantCase().Request())
 	if err == nil {
 		t.Fatal("an upstream IdP that refused the approver's token produced no error")
 	}
@@ -636,7 +636,7 @@ func TestFormMinterGrantWithoutUpstreamURLFails(t *testing.T) {
 	key, _ := newFormMinterKey(t)
 	s := startApproveServers(t, http.StatusOK, `{"grant":"g"}`, http.StatusOK)
 	m := conformance.FormMinter{BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key}
-	if _, err := m.Grant(context.Background(), grantCase()); err == nil {
+	if _, err := m.Approve(context.Background(), grantCase().Request()); err == nil {
 		t.Fatal("a grant case ran without an upstream IdP to mint the approver's token")
 	}
 }
@@ -648,7 +648,63 @@ func TestFormMinterGrantRejectsAnEmptyEnvelope(t *testing.T) {
 	m := conformance.FormMinter{
 		BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
 	}
-	if _, err := m.Grant(context.Background(), grantCase()); err == nil {
+	if _, err := m.Approve(context.Background(), grantCase().Request()); err == nil {
 		t.Fatal("a 200 carrying no grant was accepted")
+	}
+}
+
+// F12a. A refusal case that omits the calling service's credential must
+// actually omit it: the request goes out with no client_assertion key at
+// all, and the type field stays so the refusal is about the missing
+// assertion rather than about a missing type.
+func TestFormMinterApproveOmitsTheClientAssertionWhenAsked(t *testing.T) {
+	key, _ := newFormMinterKey(t)
+	s := startApproveServers(t, http.StatusBadRequest, "", http.StatusOK)
+	m := conformance.FormMinter{
+		BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
+	}
+	req := grantCase().Request()
+	req.OmitClientAssertion = true
+	_, err := m.Approve(context.Background(), req)
+	var refusal *conformance.RefusalError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("err = %v, want a *RefusalError", err)
+	}
+	if _, present := s.body["client_assertion"]; present {
+		t.Fatalf("client_assertion was sent (%v); the case asked for it to be omitted", s.body["client_assertion"])
+	}
+	if s.body["client_assertion_type"] != "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" {
+		t.Errorf("client_assertion_type = %v; it must still be sent so the refusal is about the assertion", s.body["client_assertion_type"])
+	}
+	if s.authHeader != "Bearer approver.bearer.token" {
+		t.Errorf("Authorization = %q; the approver's bearer is still presented", s.authHeader)
+	}
+}
+
+// A delegated approver is minted by the upstream IdP with an `act` chain:
+// the case names the actor and it becomes devkit's ?act= parameter. Without
+// it the upstream mints a direct token, the STS accepts, and the case fails
+// for a reason that has nothing to do with delegation.
+func TestFormMinterApproveAsksUpstreamForADelegatedApprover(t *testing.T) {
+	key, _ := newFormMinterKey(t)
+	s := startApproveServers(t, http.StatusBadRequest, "", http.StatusOK)
+	m := conformance.FormMinter{
+		BaseURL: s.sts.URL, ClientID: "c", Audience: "aud", Key: key, UpstreamURL: s.upstream.URL,
+	}
+	req := grantCase().Request()
+	req.ApproverActor = "agent:order-assistant"
+	if _, err := m.Approve(context.Background(), req); err == nil {
+		t.Fatal("a 400 produced no error")
+	}
+	if got := s.upstreamQuery.Get("act"); got != "agent:order-assistant" {
+		t.Fatalf("upstream ?act= %q, want agent:order-assistant", got)
+	}
+
+	// And a direct approver asks for no chain at all.
+	if _, err := m.Approve(context.Background(), grantCase().Request()); err == nil {
+		t.Fatal("a 400 produced no error")
+	}
+	if _, present := s.upstreamQuery["act"]; present {
+		t.Fatalf("upstream ?act= was sent for a direct approver: %v", s.upstreamQuery)
 	}
 }

@@ -84,6 +84,7 @@ func body(now time.Time, sub, clearance string, comps, verbs []any, act map[stri
 	b := map[string]any{
 		"iss": "https://minter.test", "sub": sub, "aud": []any{"garm"},
 		"jti": "t-" + sub, "iat": now.Unix(), "exp": now.Add(time.Hour).Unix(),
+		"tenant": "bank",
 		"garm": map[string]any{
 			"clearance": clearance, "compartments": comps,
 			"verbs": verbs, "kind": "USER",
@@ -112,6 +113,7 @@ func TestRunPassesWhenTheFoldMatches(t *testing.T) {
 				Clearance:    "CLEARANCE_RESTRICTED",
 				Compartments: []string{"pii-contact", "financial"}, // order must not matter
 				Verbs:        []string{"VERB_READ", "VERB_WRITE"},
+				Tenant:       "bank", Chain: []string{"user:alice"},
 			},
 		}},
 	}
@@ -229,6 +231,7 @@ func TestRunAssertsDroppedCompartments(t *testing.T) {
 				Subject: "user:alice", Clearance: "CLEARANCE_INTERNAL",
 				Compartments: []string{"support"}, Verbs: []string{"VERB_READ"},
 				Dropped: []string{"finance"},
+				Tenant:  "bank", Chain: []string{"user:alice"},
 			},
 		}},
 	}
@@ -261,7 +264,8 @@ func TestRunAssertsUnscopedToolSets(t *testing.T) {
 			Name: "unscoped", Mint: map[string]string{"user": "alice"},
 			Expect: &conformance.Expect{
 				Subject: "user:alice", Clearance: "CLEARANCE_PUBLIC",
-				Verbs: []string{"VERB_READ"},
+				Verbs:  []string{"VERB_READ"},
+				Tenant: "bank", Chain: []string{"user:alice"},
 				// ToolSets left nil: absent/null means "assert unscoped".
 			},
 		}},
@@ -282,6 +286,7 @@ func TestRunAssertsToolSetsScopedToNothing(t *testing.T) {
 		"alice": {
 			"iss": "https://minter.test", "sub": "user:alice", "aud": []any{"garm"},
 			"jti": "t-alice", "iat": now.Unix(), "exp": now.Add(time.Hour).Unix(),
+			"tenant": "bank",
 			"garm": map[string]any{
 				"clearance": "CLEARANCE_RESTRICTED", "compartments": []any{"support"},
 				"verbs": []any{"READ"}, "kind": "USER", "tool_sets": []any{"alpha"},
@@ -305,6 +310,7 @@ func TestRunAssertsToolSetsScopedToNothing(t *testing.T) {
 				Clearance:    "CLEARANCE_RESTRICTED",
 				Compartments: []string{"support"}, Verbs: []string{"VERB_READ"},
 				ToolSets: &[]string{}, // non-nil, empty: "scoped to nothing"
+				Tenant:   "bank", Chain: []string{"user:alice", "agent:bot"},
 			},
 		}},
 	}
@@ -334,6 +340,7 @@ func TestRunCatchesUnscopedWhenScopedToNothingWasExpected(t *testing.T) {
 				Subject: "user:alice", Clearance: "CLEARANCE_PUBLIC",
 				Verbs:    []string{"VERB_READ"},
 				ToolSets: &[]string{}, // demands "scoped to nothing"
+				Tenant:   "bank", Chain: []string{"user:alice"},
 			},
 		}},
 	}
@@ -539,6 +546,7 @@ func TestRunAssertsTheExecutionClaim(t *testing.T) {
 	res, err := conformance.Run(context.Background(), base(&conformance.Expect{
 		Subject: "employee:jdoe", Clearance: "CLEARANCE_INTERNAL",
 		Verbs: []string{"VERB_READ"}, Execution: "runner:conformance-client",
+		Tenant: "bank", Chain: []string{"employee:jdoe"},
 	}), m, jwksFor(t, key))
 	if err != nil {
 		t.Fatal(err)
@@ -549,7 +557,8 @@ func TestRunAssertsTheExecutionClaim(t *testing.T) {
 
 	res, _ = conformance.Run(context.Background(), base(&conformance.Expect{
 		Subject: "employee:jdoe", Clearance: "CLEARANCE_INTERNAL",
-		Verbs: []string{"VERB_READ"},
+		Verbs:  []string{"VERB_READ"},
+		Tenant: "bank", Chain: []string{"employee:jdoe"},
 	}), m, jwksFor(t, key))
 	if res[0].Err == nil {
 		t.Fatal("a token carrying exec passed a case that names no execution; " +
@@ -568,13 +577,24 @@ type fakeGrantMinter struct {
 	// mint a grant that disagrees with what was asked for.
 	approver string
 	material map[string]string
-	// noGrant makes the approval endpoint refuse, as a real one does.
-	noGrant bool
+	// refuseWith, when set, is the approval endpoint's answer: it was
+	// reached and said no, spelled however the test wants — the STS's
+	// opaque denial, or something a grantError case must NOT accept.
+	refuseWith *conformance.RefusalError
+	// unreachable is a dead port: an ordinary error, never a refusal.
+	unreachable bool
+	// last is the request the endpoint was handed, verbatim.
+	last conformance.ApprovalRequest
 }
 
-func (f *fakeGrantMinter) Grant(_ context.Context, g conformance.Grant) (string, error) {
-	if f.noGrant {
-		return "", &conformance.RefusalError{Status: http.StatusForbidden, Body: "no"}
+func (f *fakeGrantMinter) Approve(_ context.Context, g conformance.ApprovalRequest) (string, error) {
+	f.last = g
+	if f.unreachable {
+		return "", fmt.Errorf("approval endpoint unreachable: %w",
+			fmt.Errorf("dial tcp 127.0.0.1:8081: connect: connection refused"))
+	}
+	if f.refuseWith != nil {
+		return "", f.refuseWith
 	}
 	approver := f.approver
 	if approver == "" {
@@ -693,9 +713,196 @@ func TestRunGrantCaseFailsAgainstATokenOnlyMinter(t *testing.T) {
 // satisfied by.
 func TestRunGrantCaseFailsWhenTheApprovalEndpointRefuses(t *testing.T) {
 	key := newECKey(t)
-	m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}, noGrant: true}
+	m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}, refuseWith: opaqueDenial()}
 	res, _ := conformance.Run(context.Background(), grantSuite(), m, jwksFor(t, key))
 	if res[0].Err == nil {
 		t.Fatal("a refused approval was reported as a pass")
+	}
+}
+
+// F12b. Tenant and chain are part of the fold and compare asserts both
+// UNCONDITIONALLY, like subject and execution: the tenant is what confines
+// a caller to their own organisation's data, and the chain is every hop the
+// fold walked, in order — Chain[0] is the subject, the last hop the actor.
+func TestRunAssertsTenantAndChain(t *testing.T) {
+	now := time.Now()
+	key := newECKey(t)
+	delegated := body(now, "employee:jdoe", "CLEARANCE_INTERNAL", []any{"support"}, []any{"READ"},
+		map[string]any{"sub": "agent:order-assistant", "garm": map[string]any{
+			"clearance": "CLEARANCE_INTERNAL", "compartments": []any{"support"},
+			"verbs": []any{"READ"}, "kind": "AGENT"}})
+	delegated["tenant"] = "acme"
+	m := &fakeMinter{key: key, bodies: map[string]map[string]any{"jdoe": delegated}}
+	suite := func(e *conformance.Expect) *conformance.Suite {
+		return &conformance.Suite{
+			Issuer: "https://minter.test", Audience: "garm",
+			Compartments: []string{"support"},
+			Cases: []conformance.Case{{
+				Name: "jdoe via order-assistant", Mint: map[string]string{"user": "jdoe"}, Expect: e,
+			}},
+		}
+	}
+	right := func() *conformance.Expect {
+		return &conformance.Expect{
+			Subject: "employee:jdoe", Actor: "agent:order-assistant",
+			Clearance: "CLEARANCE_INTERNAL", Compartments: []string{"support"},
+			Verbs:  []string{"VERB_READ"},
+			Tenant: "acme", Chain: []string{"employee:jdoe", "agent:order-assistant"},
+		}
+	}
+
+	res, err := conformance.Run(context.Background(), suite(right()), m, jwksFor(t, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].Err != nil {
+		t.Fatalf("a case naming the right tenant and chain failed: %v", res[0].Err)
+	}
+
+	for name, tc := range map[string]struct {
+		mutate func(*conformance.Expect)
+		names  string
+	}{
+		"wrong tenant":       {func(e *conformance.Expect) { e.Tenant = "globex" }, "tenant"},
+		"no tenant":          {func(e *conformance.Expect) { e.Tenant = "" }, "tenant"},
+		"a hop missing":      {func(e *conformance.Expect) { e.Chain = []string{"employee:jdoe"} }, "chain"},
+		"hops out of order":  {func(e *conformance.Expect) { e.Chain = []string{"agent:order-assistant", "employee:jdoe"} }, "chain"},
+		"a hop never walked": {func(e *conformance.Expect) { e.Chain = append(e.Chain, "service:bff") }, "chain"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := right()
+			tc.mutate(e)
+			res, _ := conformance.Run(context.Background(), suite(e), m, jwksFor(t, key))
+			if res[0].Err == nil {
+				t.Fatalf("a case with %s passed", name)
+			}
+			if !strings.Contains(res[0].Err.Error(), tc.names) {
+				t.Fatalf("the error must name %s as what disagreed: %v", tc.names, res[0].Err)
+			}
+		})
+	}
+}
+
+// F12a. A grantError case asserts the approval endpoint REFUSED — and
+// refused the way the STS's contract says every refusal looks: the one
+// opaque `400 {"error":"access_denied"}`. Anything else is not a refusal
+// this case is satisfied by: a 500 is a crashed service, a 405 is the wrong
+// method, a body naming the reason is an enumeration oracle, and none of
+// those is the property the case pins.
+
+func grantErrorSuite() *conformance.Suite {
+	return &conformance.Suite{
+		Issuer: "https://minter.test", Audience: "garm",
+		Compartments: []string{"financial"},
+		Cases: []conformance.Case{{
+			Name: "an approval the STS must refuse",
+			GrantError: &conformance.GrantError{
+				Approver: "jdoe", ApproverClearance: "RESTRICTED",
+				ApproverCompartments: []string{"financial"},
+				ApproverActor:        "agent:order-assistant",
+				Tool:                 "payments.v1.initiate_payment",
+				Subject:              "employee:jdoe",
+				Material:             map[string]string{"amount_minor_units": "25000"},
+			},
+		}},
+	}
+}
+
+func opaqueDenial() *conformance.RefusalError {
+	return &conformance.RefusalError{Status: http.StatusBadRequest, Body: `{"error":"access_denied"}`}
+}
+
+func TestRunGrantErrorCasePassesOnTheOpaqueRefusal(t *testing.T) {
+	key := newECKey(t)
+	m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}, refuseWith: opaqueDenial()}
+	res, err := conformance.Run(context.Background(), grantErrorSuite(), m, jwksFor(t, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res[0].Err != nil {
+		t.Fatalf("a refusal the suite expected was reported as a failure: %v", res[0].Err)
+	}
+}
+
+func TestRunGrantErrorCaseFailsWhenTheApprovalEndpointMints(t *testing.T) {
+	key := newECKey(t)
+	m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}} // mints happily
+	res, _ := conformance.Run(context.Background(), grantErrorSuite(), m, jwksFor(t, key))
+	if res[0].Err == nil {
+		t.Fatal("the approval endpoint minted a grant the suite says it must refuse, and the case passed")
+	}
+	if !strings.Contains(res[0].Err.Error(), "must refuse") {
+		t.Fatalf("the error must say the suite expected a refusal: %v", res[0].Err)
+	}
+}
+
+func TestRunGrantErrorCaseFailsOnAnyAnswerButTheOpaqueDenial(t *testing.T) {
+	key := newECKey(t)
+	for name, refusal := range map[string]*conformance.RefusalError{
+		"a 500":                     {Status: http.StatusInternalServerError, Body: "boom"},
+		"a 403 with the right body": {Status: http.StatusForbidden, Body: `{"error":"access_denied"}`},
+		"a 400 naming the reason":   {Status: http.StatusBadRequest, Body: `{"error":"approver is not an employee"}`},
+		"a 400 with a bare body":    {Status: http.StatusBadRequest, Body: "access_denied"},
+		"a 405":                     {Status: http.StatusMethodNotAllowed, Body: "method not allowed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}, refuseWith: refusal}
+			res, _ := conformance.Run(context.Background(), grantErrorSuite(), m, jwksFor(t, key))
+			if res[0].Err == nil {
+				t.Fatalf("%s satisfied a grantError case; only the opaque 400 access_denied may", name)
+			}
+		})
+	}
+}
+
+// The same rule mintError has: "could not be reached" is not "refused".
+func TestRunGrantErrorCaseFailsWhenTheApprovalEndpointIsUnreachable(t *testing.T) {
+	key := newECKey(t)
+	m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}, unreachable: true}
+	res, err := conformance.Run(context.Background(), grantErrorSuite(), m, jwksFor(t, key))
+	if err != nil {
+		t.Fatalf("an unreachable endpoint is a case failure, not a run failure: %v", err)
+	}
+	if res[0].Err == nil {
+		t.Fatal("a grantError case against a dead approval endpoint reported ok")
+	}
+	if !strings.Contains(res[0].Err.Error(), "could not be reached") {
+		t.Fatalf("the failure must say the endpoint was unreachable, not imply a refusal: %v", res[0].Err)
+	}
+}
+
+func TestRunGrantErrorCaseFailsAgainstATokenOnlyMinter(t *testing.T) {
+	key := newECKey(t)
+	res, _ := conformance.Run(context.Background(), grantErrorSuite(), &fakeMinter{key: key}, jwksFor(t, key))
+	if res[0].Err == nil {
+		t.Fatal("a grantError case against a token-only minter was reported as a pass")
+	}
+}
+
+// What the case declares must reach the minter verbatim: the delegated
+// approver, the omitted assertion and the malformed path are each the
+// whole point of their case, and a harness that quietly repaired any of
+// them would send a request the STS accepts.
+func TestRunGrantErrorCaseHandsTheMinterTheRequestAsDeclared(t *testing.T) {
+	key := newECKey(t)
+	m := &fakeGrantMinter{fakeMinter: fakeMinter{key: key}, refuseWith: opaqueDenial()}
+	s := grantErrorSuite()
+	s.Cases[0].GrantError.OmitClientAssertion = true
+	s.Cases[0].GrantError.Material = map[string]string{"amount=minor": "1"}
+	if _, err := conformance.Run(context.Background(), s, m, jwksFor(t, key)); err != nil {
+		t.Fatal(err)
+	}
+	got := m.last
+	if got.ApproverActor != "agent:order-assistant" {
+		t.Errorf("approverActor = %q, want agent:order-assistant", got.ApproverActor)
+	}
+	if !got.OmitClientAssertion {
+		t.Error("omitClientAssertion did not reach the minter")
+	}
+	if got.Material["amount=minor"] != "1" {
+		t.Errorf("material = %v; the malformed path must be sent as declared", got.Material)
+	}
+	if got.Approver != "jdoe" || got.ApproverClearance != "RESTRICTED" || got.Tool != "payments.v1.initiate_payment" {
+		t.Errorf("request = %+v", got)
 	}
 }

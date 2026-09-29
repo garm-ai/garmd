@@ -171,6 +171,38 @@ approval grants, single-use — is implemented and constructed when
 (step 10) are not implemented, and a catalogue declaring either refuses to
 mount rather than being served ungated.
 
+## Checking the minter agrees
+
+The tokens and approval grants this daemon verifies are minted by
+[`garm-ai/sts`](https://github.com/garm-ai/sts), which this repository never
+imports. Whether the two sides agree is checked by `internal/conformance`: a
+suite of cases in `internal/conformance/suites/sts.json` (and a devkit one
+beside it) is driven against a running minter over HTTP, and every answer is
+verified with this repository's own code. Four kinds of case — `expect`,
+`mintError`, `grant` and `grantError` — and each asserts exactly one thing;
+`KNOWN-GAPS.md` says what each pins and what none of them reaches.
+
+CI runs it in the `conformance` job of `.github/workflows/ci.yml` against
+`sts` at a pinned tag. To run it on a laptop, start devkit as the upstream IdP
+and the STS trusting it, then point the suite at both (the job's steps are the
+reference for the STS config; pick ports nothing else holds):
+
+```
+garmdev idp --addr 127.0.0.1:17450 --audience garm-customer-idp        # devkit, the upstream IdP
+sts -config sts-config.yaml                                             # listen: 127.0.0.1:18081, trusting the devkit issuer as kind: employee
+go test -tags conformance ./internal/conformance/ -v \
+  -suite suites/sts.json -idp http://127.0.0.1:18081 -minter form \
+  -client-id conformance-client -client-key conformance-client.key \
+  -token-endpoint-aud https://sts.internal.example.com/token \
+  -upstream-idp http://127.0.0.1:17450
+```
+
+The devkit suite takes the other minter shape:
+`garmdev idp --addr 127.0.0.1:17451 --personas examples/personas.yaml`, then
+`-suite suites/devkit.json -idp http://127.0.0.1:17451 -minter get`. The run
+is behind a build tag and refuses to start without `-suite` and `-idp`: a
+conformance run with nothing to check must not report ok.
+
 See `KNOWN-GAPS.md` before putting this in front of anything that matters. It
 is kept honest rather than aspirational.
 
