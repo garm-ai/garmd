@@ -27,9 +27,8 @@ import (
 func audienceCatalogue(t *testing.T) *catalogue.Catalogue {
 	t.Helper()
 	body := assemble(t, map[string]string{
-		"garm/tool/v1/tool.proto":         readTestdata(t, "testdata/tool.proto"),
 		"bank/payments/v1/audience.proto": readTestdata(t, "testdata/audience.proto"),
-	}, []string{"garm/tool/v1/tool.proto", "bank/payments/v1/audience.proto"})
+	}, []string{"bank/payments/v1/audience.proto"})
 
 	cat, err := catalogue.Load(body, time.Now)
 	if err != nil {
@@ -141,6 +140,46 @@ func TestNormaliseAudienceAcceptsBothSpellingsAndRefusesTheRest(t *testing.T) {
 		if got, ok := tool.NormaliseAudience(bad); ok {
 			t.Errorf("NormaliseAudience(%q) = (%q, true); an audience that is not one "+
 				"must be refused rather than defaulted", bad, got)
+		}
+	}
+}
+
+// A catalogue built against a tool.proto this binary is OLDER than is still
+// read correctly.
+//
+// This is the property that let Track D ship before garm v0.17.0 existed, and
+// it must keep holding for the field after this one. The fixture is the
+// shipped contract with `audience` moved to field 40: the linked ToolPolicy
+// then has no field there, the value survives in the annotation's unknown
+// bytes, and audience.go finds the number by NAME in the catalogue's own
+// descriptors and reads it from those bytes.
+//
+// A test against the linked contract alone cannot cover this, because there
+// the field resolves and the unknown-bytes path is never taken — so deleting
+// this fixture deletes the only coverage of the mechanism.
+func TestAnAudienceAtAFieldNumberThisBinaryDoesNotKnowIsStillRead(t *testing.T) {
+	body := assemble(t, map[string]string{
+		"garm/tool/v1/tool.proto":         readTestdata(t, "testdata/future_tool.proto"),
+		"bank/payments/v1/audience.proto": readTestdata(t, "testdata/audience.proto"),
+	}, []string{"garm/tool/v1/tool.proto", "bank/payments/v1/audience.proto"})
+
+	cat, err := catalogue.Load(body, time.Now)
+	if err != nil {
+		t.Fatalf("a catalogue from the future would not load: %v", err)
+	}
+
+	want := map[string][]string{
+		"bank.payments.v1.get_balance":                    {tool.AudienceAgent},
+		"bank.payments.v1.initiate_payment_approval_card": {tool.AudiencePerson},
+		"bank.payments.v1.create_task":                    {tool.AudienceRunner},
+		"bank.payments.v1.support_assistant":              {tool.AudiencePerson, tool.AudienceAgent},
+		"bank.payments.v1.get_status":                     nil,
+	}
+	for _, d := range cat.Defs {
+		if !slices.Equal(d.Audience, want[d.FQN]) {
+			t.Errorf("%s audience = %v, want %v — the number was found by NAME in "+
+				"the catalogue's own descriptors, or it was not found at all",
+				d.FQN, d.Audience, want[d.FQN])
 		}
 	}
 }

@@ -239,12 +239,21 @@ same closed answer a tool they may not see gets. A section all of whose
 children were withheld goes whole.
 
 Two things make that safe to hand a tool. An element with **no** label is read
-at the endpoint's own policy, never at PUBLIC — a handler that forgot to label
-something cannot thereby publish it. And an element labelled **below** the
-endpoint's own policy refuses the whole call with a 500 and `card_invalid` on
-the ledger row, naming the element: a card carrying a label looser than the
-gate it came through was built against a policy nobody checked, and serving
-the rest of it would mean trusting the labels that happen to look right.
+at the policy of whatever encloses it — the section it sits in, or failing
+that the endpoint — and never at PUBLIC, so a handler that forgot to label
+something cannot thereby publish it. And an element labelled **below** that
+floor refuses the whole call with a 500 and `card_invalid` on the ledger row,
+naming the element: a card carrying a label looser than the gate it came
+through was built against a policy nobody checked, and serving the rest of it
+would mean trusting the labels that happen to look right.
+
+The floor is per element, not only per endpoint. A section is a floor for what
+is inside it — a child may be labelled higher, never lower — which the
+contract's lint checks on a declared *template*, and which is checked again
+here because a card a handler built in Go has no template to lint and reaches
+a viewer all the same. A child at `INTERNAL` inside a `RESTRICTED` section
+clears the endpoint's floor and would otherwise be shown to a reader who
+cannot see the heading it sits under.
 
 This is not garmd learning what a card means. It reads the label and nothing
 else — not the kinds, not the templates, not `card_role` — and it cannot tell

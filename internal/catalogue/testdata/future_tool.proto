@@ -1,18 +1,20 @@
 // ===========================================================================
-// A FIXTURE: `garm/tool/v1/tool.proto` as Track G wrote it, carrying the one
-// thing the garm this repository builds against does not have —
-// `ToolPolicy.audience` (design §2.5).
+// A FIXTURE: `garm/tool/v1/tool.proto` FROM THE FUTURE.
 //
-// It is here because a catalogue is DATA. The artifact carries the tool.proto
-// it was built with, so a catalogue can know a field this binary does not,
-// and internal/catalogue/audience.go reads the field's NUMBER out of those
-// descriptors by NAME and the VALUE out of the annotation's unknown bytes.
-// Compiling a fixture against this file and then resolving its options
-// against the LINKED garm.tool.v1 reproduces that exactly: the daemon meets
-// an audience it was not built with.
+// Identical to the contract this binary links, with one difference —
+// `ToolPolicy.audience` is field 40 rather than 14. Nothing ships it; it
+// exists to hold one property that would otherwise rot the moment garm and
+// garmd agreed:
 //
-// **When garm v0.17.0 lands and go.mod is bumped, delete this file** and let
-// the fixtures compile against the linked contract again. See KNOWN-GAPS.md.
+//   internal/catalogue/audience.go finds the field by NAME in the
+//   CATALOGUE's own descriptors and reads its value out of the annotation's
+//   unknown bytes, so a catalogue built against a tool.proto this binary is
+//   older than is still read correctly.
+//
+// That is the mechanism that let Track D ship before garm v0.17.0 existed,
+// and it is the mechanism that will let the next field ship the same way. A
+// test against the LINKED contract alone cannot exercise it, because there
+// the field resolves and the unknown-bytes path is never taken.
 // ===========================================================================
 
 // Annotation vocabulary for the tools server (tools spec §3).
@@ -292,7 +294,7 @@ message ToolPolicy {
   // while initiate_payment is [AGENT] and its approval card is [PERSON].
   // RUNNER does not overlap with either: a tool the runner fills in is not
   // one a model or a person may call at all.
-  repeated Audience audience = 14;
+  repeated Audience audience = 40;   // 14 in the shipped contract; see the header
 }
 
 // ---------------------------------------------------------------- declarations

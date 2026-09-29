@@ -261,7 +261,7 @@ func (c *Core) AddTools(tools []ToolDef) error {
 			if _, ok := c.plans[md]; ok {
 				continue
 			}
-			plan, err := c.compilePlan(md)
+			plan, err := policy.Compile(md, c.reg)
 			if err != nil {
 				return fmt.Errorf("tool %q: %w", t.Name, err)
 			}

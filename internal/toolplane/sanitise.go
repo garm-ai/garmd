@@ -144,7 +144,7 @@ func reachesCard(md protoreflect.MessageDescriptor, seen map[protoreflect.FullNa
 	seen[md.FullName()] = true
 	fields := md.Fields()
 	for i := 0; i < fields.Len(); i++ {
-		child, ok := policy.SubtreeOf(fields.Get(i))
+		child, ok := cardChildOf(fields.Get(i))
 		if ok && reachesCard(child, seen) {
 			return true
 		}
@@ -152,113 +152,35 @@ func reachesCard(md protoreflect.MessageDescriptor, seen map[protoreflect.FullNa
 	return false
 }
 
-// compilePlan is the per-message plan, with one rule added to policy.Compile:
-// a Card is an opaque leaf.
+// cardChildOf reports whether the card walk descends into fd, and into which
+// message.
 //
-// It has to be. policy.Compile flattens a message graph into a finite list of
-// field paths and REFUSES a cycle, and garm.card.v1 is cyclic by construction
-// — a Section holds Elements. Every field of a card's interior is also
-// unannotated, because a card's policy is on the value and not on the
-// descriptor, so even an acyclic card would fail Compile's "field has no
-// policy and no message default". Descending into a card is therefore not
-// merely unnecessary, it is impossible; and treating it as a leaf is the same
-// judgement policy.IsOpaqueLeafMessage already makes about a Timestamp, for a
-// reason that is closer than it looks: the field's own policy governs the
-// whole value, and what is INSIDE is governed by something else — here, by
-// the card walk at step 8.
+// It is deliberately NOT policy.SubtreeOf. Since garm v0.17.0 that function
+// stops at a `garm.card.v1.Card`, because the FIELD PLAN treats a card as an
+// opaque value — which is right, and is the half of the work this daemon
+// needed from the contract. The card walk is the other half and has the
+// opposite job: a card is precisely what it is looking for, so it has to
+// descend where the field plan stops. Sharing one predicate between the two
+// would make each release of garm's policy package a silent change to which
+// cards get projected, and the failure would look like a card served whole.
 //
-// A response that IS a Card gets an EMPTY plan. That is the design's own
-// sentence (§10.3 frame 7: "field plan: Card has no policied scalar fields"),
-// and the card walk is the whole of its enforcement.
-func (c *Core) compilePlan(md protoreflect.MessageDescriptor) (*policy.Plan, error) {
-	if isCardMessage(md) {
-		return &policy.Plan{Desc: md}, nil
+// Well-known types are skipped for the ordinary reason: they hold no labels
+// and no cards, and a Timestamp is a value.
+func cardChildOf(fd protoreflect.FieldDescriptor) (protoreflect.MessageDescriptor, bool) {
+	if fd.Kind() != protoreflect.MessageKind {
+		return nil, false
 	}
-	if !containsCard(md) {
-		return policy.Compile(md, c.reg)
+	md := fd.Message()
+	if fd.IsMap() {
+		if fd.MapValue().Kind() != protoreflect.MessageKind {
+			return nil, false
+		}
+		md = fd.MapValue().Message()
 	}
-	p := &policy.Plan{Desc: md}
-	if err := compileAroundCards(p, md, c.reg, nil, "", map[protoreflect.FullName]bool{}); err != nil {
-		return nil, err
+	if md == nil || strings.HasPrefix(string(md.FullName()), "google.protobuf.") {
+		return nil, false
 	}
-	return p, nil
-}
-
-// compileAroundCards mirrors policy.Compile's walk, stopping at a Card.
-//
-// It is a mirror rather than a wrapper because policy.Compile offers no seam
-// to stop at: the walk is one unexported function. Everything it decides —
-// which policy a field carries, which compartments that resolves to, what
-// counts as a subtree — is still policy's, called here, so the only thing
-// this copy owns is the one extra line that refuses to descend into a card.
-func compileAroundCards(
-	p *policy.Plan,
-	md protoreflect.MessageDescriptor,
-	reg *policy.Registry,
-	path []protoreflect.FieldNumber,
-	prefix string,
-	seen map[protoreflect.FullName]bool,
-) error {
-	if seen[md.FullName()] {
-		at := "(root)"
-		if prefix != "" {
-			at = prefix
-		}
-		return fmt.Errorf("%s: recursive message type reached again at %q: a cycle "+
-			"cannot be flattened into a finite plan", md.FullName(), at)
-	}
-	seen[md.FullName()] = true
-	defer delete(seen, md.FullName())
-
-	def := policy.MessageDefaultPolicy(md)
-	fields := md.Fields()
-	for i := 0; i < fields.Len(); i++ {
-		fd := fields.Get(i)
-		fp := policy.FieldPolicyOf(fd, def)
-		if fp == nil {
-			return fmt.Errorf("%s: field %q has no policy and no message default",
-				md.FullName(), fd.Name())
-		}
-		need, err := reg.Set(fp.GetCompartments())
-		if err != nil {
-			return fmt.Errorf("%s.%s: %w", md.FullName(), fd.Name(), err)
-		}
-
-		name := string(fd.Name())
-		if prefix != "" {
-			name = prefix + "." + name
-		}
-
-		childMD, descend := policy.SubtreeOf(fd)
-		if descend && isCardMessage(childMD) {
-			// The leaf. The field's own policy still governs the whole card
-			// as a value — policy.Sanitize will drop it outright for a caller
-			// the field denies — and what is inside it is the card walk's.
-			descend = false
-		}
-
-		write := fp.GetWrite()
-		if write == toolv1.Clearance_CLEARANCE_UNSPECIFIED {
-			write = fp.GetRead()
-		}
-		p.Actions = append(p.Actions, policy.Action{
-			Path:        append(append([]protoreflect.FieldNumber{}, path...), fd.Number()),
-			Name:        name,
-			Read:        fp.GetRead(),
-			Write:       write,
-			Need:        need,
-			OnDeny:      fp.GetOnDeny(),
-			IsSubtree:   descend,
-			AuditOnRead: fp.GetAuditOnRead(),
-		})
-		if descend {
-			child := append(append([]protoreflect.FieldNumber{}, path...), fd.Number())
-			if err := compileAroundCards(p, childMD, reg, child, name, seen); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return md, true
 }
 
 // ---------------------------------------------------------------- the walk
@@ -279,10 +201,81 @@ func compileAroundCards(
 type cardFloor struct {
 	clearance    toolv1.Clearance
 	compartments []string
+
+	// check names WHICH floor this is, for the ledger: the endpoint's, a
+	// Section's, or an enclosing element's. An operator reading
+	// `label_below_section: body[0].elements[1]` knows where to look; one
+	// reading `label_below_endpoint` for the same element would go and check
+	// the tool's min_clearance and find nothing wrong with it.
+	check string
+}
+
+// under returns the floor that applies INSIDE a labelled node.
+//
+// A labelled element is a floor for everything it contains. For a Section
+// that is the contract saying so — "a child may be labelled higher, never
+// lower" — and lint C8 checks it at publish time, but lint can only see a
+// TEMPLATE: a card an override built by hand has no template to lint, and it
+// reaches a viewer all the same. So the same rule is enforced here, per call,
+// where every card passes whatever built it.
+//
+// It is applied to every labelled element and not only to a Section because
+// the rule is the same one and the narrower version would be a special case
+// for a message name: a reader who cannot see the thing a fact is inside
+// cannot be shown the fact, whether the container was titled or not.
+func (f cardFloor) under(l label, isSection bool) cardFloor {
+	out := cardFloor{clearance: f.clearance, compartments: f.compartments, check: labelBelowElement}
+	if isSection {
+		out.check = labelBelowSection
+	}
+	if l.clearance > out.clearance {
+		out.clearance = l.clearance
+	}
+	for _, name := range l.compartments {
+		if !containsString(out.compartments, name) {
+			out.compartments = append(append([]string(nil), out.compartments...), name)
+		}
+	}
+	return out
+}
+
+// admits reports whether a label is AT OR ABOVE this floor.
+func (f cardFloor) admits(l label) bool {
+	return l.clearance >= f.clearance && coversNames(l.compartments, f.compartments)
+}
+
+// The three floors, as they read on a ledger row.
+const (
+	labelBelowEndpoint = "label_below_endpoint"
+	labelBelowSection  = "label_below_section"
+	labelBelowElement  = "label_below_element"
+)
+
+// sectionMessageName is read for ONE thing only: which of the three names
+// above a refusal carries. Nothing about the projection depends on it — a
+// Section is projected by the same rule as every other labelled element —
+// so this is diagnostics, not policy.
+const sectionMessageName protoreflect.FullName = "garm.card.v1.Section"
+
+// holdsASection reports whether a labelled element's payload is a Section.
+func holdsASection(m protoreflect.Message) bool {
+	var found bool
+	m.Range(func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		if fd.Kind() == protoreflect.MessageKind && !fd.IsList() && !fd.IsMap() &&
+			fd.Message() != nil && fd.Message().FullName() == sectionMessageName {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 func (c *Core) floorFor(t ToolDef, md protoreflect.MessageDescriptor) cardFloor {
-	f := cardFloor{clearance: t.MinClearance, compartments: append([]string(nil), t.Compartments...)}
+	f := cardFloor{
+		clearance:    t.MinClearance,
+		compartments: append([]string(nil), t.Compartments...),
+		check:        labelBelowEndpoint,
+	}
 	if def := policy.MessageDefaultPolicy(md); def != nil {
 		if def.GetRead() > f.clearance {
 			f.clearance = def.GetRead()
@@ -322,24 +315,27 @@ type cardResult struct {
 
 // projectCards is the card walk: step 8's second half, after the field plan.
 func (c *Core) projectCards(p *Principal, t ToolDef, resp proto.Message) cardResult {
-	w := &cardWalk{core: c, principal: p, floor: c.floorFor(t, resp.ProtoReflect().Descriptor())}
+	w := &cardWalk{core: c, principal: p}
+	floor := c.floorFor(t, resp.ProtoReflect().Descriptor())
 
 	// Validation first, over the WHOLE tree, before anything is removed.
 	// Floor 1 refuses the entire call, so a card that is going to be refused
 	// must not have been half-projected on the way to finding out.
-	w.validate(resp.ProtoReflect(), "")
+	w.validate(resp.ProtoReflect(), "", floor)
 	if w.invalid != "" {
 		return cardResult{invalid: w.invalid}
 	}
 
-	gone := w.forEachCard(resp.ProtoReflect(), "", w.projectCard)
+	gone := w.forEachCard(resp.ProtoReflect(), "",
+		func(card protoreflect.Message, path string) bool {
+			return w.projectCard(card, path, floor)
+		})
 	return cardResult{withheld: w.withheld, gone: gone}
 }
 
 type cardWalk struct {
 	core      *Core
 	principal *Principal
-	floor     cardFloor
 
 	withheld []string
 	invalid  string
@@ -362,7 +358,7 @@ func (w *cardWalk) forEachCard(
 	fields := m.Descriptor().Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		child, ok := policy.SubtreeOf(fd)
+		child, ok := cardChildOf(fd)
 		if !ok || !m.Has(fd) || !containsCard(child) {
 			continue
 		}
@@ -399,8 +395,8 @@ func (w *cardWalk) forEachCard(
 }
 
 // projectCard applies rule 1 to one card, and reports whether it survives.
-func (w *cardWalk) projectCard(card protoreflect.Message, path string) bool {
-	if !w.reaches(card) {
+func (w *cardWalk) projectCard(card protoreflect.Message, path string, floor cardFloor) bool {
+	if !w.reaches(card, floor) {
 		w.note(card, path)
 		return false
 	}
@@ -413,19 +409,33 @@ func (w *cardWalk) projectCard(card protoreflect.Message, path string) bool {
 	// are the ones it carries — a page of cards does not hand each of them
 	// the paths withheld from its neighbours.
 	mark := len(w.withheld)
-	w.projectChildren(card, "")
+	w.projectChildren(card, "", w.floorInside(card, floor))
 	w.recordDisclosure(card, w.withheld[mark:])
 	return true
 }
 
+// floorInside is the floor that applies to a labelled node's children: its
+// own label when it has one, the inherited floor when it does not.
+func (w *cardWalk) floorInside(m protoreflect.Message, floor cardFloor) cardFloor {
+	fd := accessFieldOf(m.Descriptor())
+	if fd == nil || !m.Has(fd) {
+		return floor
+	}
+	lbl, ok := readLabel(m.Get(fd).Message())
+	if !ok {
+		return floor
+	}
+	return floor.under(lbl, holdsASection(m))
+}
+
 // projectNode projects one labelled node and reports whether it survives.
-func (w *cardWalk) projectNode(m protoreflect.Message, path string) bool {
-	if !w.reaches(m) {
+func (w *cardWalk) projectNode(m protoreflect.Message, path string, floor cardFloor) bool {
+	if !w.reaches(m, floor) {
 		w.note(m, path)
 		return false
 	}
 	mark := len(w.withheld)
-	kept, total := w.projectChildren(m, path)
+	kept, total := w.projectChildren(m, path, w.floorInside(m, floor))
 	if total > 0 && kept == 0 {
 		// "A Section whose every child is withheld is withheld whole." The
 		// children's own entries are replaced by the parent's rather than
@@ -455,11 +465,13 @@ func (w *cardWalk) projectNode(m protoreflect.Message, path string) bool {
 // through it without extending the path, which is what makes an element's
 // path read `body[2].facts[1]` rather than `body[2].facts.facts[1]` — a
 // FactSet is a container in the vocabulary, not a position in the layout.
-func (w *cardWalk) projectChildren(m protoreflect.Message, path string) (kept, total int) {
+func (w *cardWalk) projectChildren(
+	m protoreflect.Message, path string, floor cardFloor,
+) (kept, total int) {
 	fields := m.Descriptor().Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		child, ok := policy.SubtreeOf(fd)
+		child, ok := cardChildOf(fd)
 		if !ok || fd.IsMap() || !m.Has(fd) {
 			continue
 		}
@@ -476,7 +488,7 @@ func (w *cardWalk) projectChildren(m protoreflect.Message, path string) (kept, t
 				w.filterList(m, fd, func(el protoreflect.Message) bool {
 					p := indexPath(path, string(fd.Name()), idx)
 					idx++
-					keep := w.projectNode(el, p)
+					keep := w.projectNode(el, p, floor)
 					if keep {
 						survived++
 					}
@@ -488,7 +500,7 @@ func (w *cardWalk) projectChildren(m protoreflect.Message, path string) (kept, t
 			}
 			list := m.Get(fd).List()
 			for j := 0; j < list.Len(); j++ {
-				k, t := w.projectChildren(list.Get(j).Message(), path)
+				k, t := w.projectChildren(list.Get(j).Message(), path, floor)
 				kept += k
 				total += t
 			}
@@ -499,14 +511,14 @@ func (w *cardWalk) projectChildren(m protoreflect.Message, path string) (kept, t
 		if labelled {
 			total++
 			p := namePath(path, string(fd.Name()))
-			if w.projectNode(sub, p) {
+			if w.projectNode(sub, p, floor) {
 				kept++
 			} else {
 				m.Clear(fd)
 			}
 			continue
 		}
-		k, t := w.projectChildren(sub, path)
+		k, t := w.projectChildren(sub, path, floor)
 		kept += k
 		total += t
 	}
@@ -540,12 +552,22 @@ func (w *cardWalk) filterList(
 	}
 }
 
-// validate is floor 1, over every labelled node of every card in the message.
+// validate is the floors, over every labelled node of every card.
+//
+// There are two, and they are the same rule applied at two scopes. The
+// ENDPOINT floor (§3.2 floor 1): no element may be labelled below the policy
+// the card endpoint is already gated at. The ENCLOSING floor: no element may
+// be labelled below the element that contains it — the contract's "a Section
+// is a floor for its children; higher, never lower", which lint C8 checks on
+// a TEMPLATE at publish time and which has to be checked HERE as well,
+// because a card an override built by hand has no template to lint and
+// reaches a viewer all the same. A reader who cannot see the heading must not
+// be shown what was under it.
 //
 // It reads and never writes. The first violation wins and names itself; there
 // is no list, because the answer is the same for one as for ten — the whole
 // card is refused — and an operator fixing the first will see the second.
-func (w *cardWalk) validate(m protoreflect.Message, path string) {
+func (w *cardWalk) validate(m protoreflect.Message, path string, floor cardFloor) {
 	if w.invalid != "" {
 		return
 	}
@@ -559,18 +581,17 @@ func (w *cardWalk) validate(m protoreflect.Message, path string) {
 		case !ok:
 			w.invalid = "unreadable_label: " + orRoot(path)
 			return
-		case lbl.clearance < w.floor.clearance:
-			w.invalid = "label_below_endpoint: " + orRoot(path)
-			return
-		case !coversNames(lbl.compartments, w.floor.compartments):
-			w.invalid = "label_below_endpoint: " + orRoot(path)
+		case !floor.admits(lbl):
+			w.invalid = floor.check + ": " + orRoot(path)
 			return
 		}
+		// Everything below this node is under ITS label now.
+		floor = floor.under(lbl, holdsASection(m))
 	}
 	fields := m.Descriptor().Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		child, ok := policy.SubtreeOf(fd)
+		child, ok := cardChildOf(fd)
 		if !ok || fd.IsMap() || !m.Has(fd) {
 			continue
 		}
@@ -585,7 +606,7 @@ func (w *cardWalk) validate(m protoreflect.Message, path string) {
 				if labelled {
 					p = indexPath(path, string(fd.Name()), j)
 				}
-				w.validate(list.Get(j).Message(), p)
+				w.validate(list.Get(j).Message(), p, floor)
 				if w.invalid != "" {
 					return
 				}
@@ -596,7 +617,7 @@ func (w *cardWalk) validate(m protoreflect.Message, path string) {
 		if labelled {
 			p = namePath(path, string(fd.Name()))
 		}
-		w.validate(m.Get(fd).Message(), p)
+		w.validate(m.Get(fd).Message(), p, floor)
 		if w.invalid != "" {
 			return
 		}
@@ -608,8 +629,8 @@ func (w *cardWalk) validate(m protoreflect.Message, path string) {
 //
 // An UNLABELLED node is read at the floor rather than waved through, which is
 // the whole of "absent means the endpoint's policy, never PUBLIC".
-func (w *cardWalk) reaches(m protoreflect.Message) bool {
-	lbl := label{clearance: w.floor.clearance, compartments: w.floor.compartments}
+func (w *cardWalk) reaches(m protoreflect.Message, floor cardFloor) bool {
+	lbl := label{clearance: floor.clearance, compartments: floor.compartments}
 	if fd := accessFieldOf(m.Descriptor()); fd != nil && m.Has(fd) {
 		read, ok := readLabel(m.Get(fd).Message())
 		if !ok {

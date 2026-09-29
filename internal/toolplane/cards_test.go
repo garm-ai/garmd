@@ -552,7 +552,11 @@ func TestAnElementLabelledBelowTheEndpointRefusesTheWholeCard(t *testing.T) {
 	if events[0].ErrorKind != toolplane.ErrorKindCardInvalid {
 		t.Errorf("error_kind = %q, want %q", events[0].ErrorKind, toolplane.ErrorKindCardInvalid)
 	}
-	want := "card_invalid: label_below_endpoint: body[1].elements[0]"
+	// It names the SECTION floor and not the endpoint's, because the element
+	// is inside a Section labelled RESTRICTED + [financial] and that is the
+	// floor it is actually under. An operator told "label_below_endpoint"
+	// would go and check the tool's min_clearance and find nothing wrong.
+	want := "card_invalid: label_below_section: body[1].elements[0]"
 	if events[0].ErrorDetail != want {
 		t.Errorf("error_detail = %q, want %q", events[0].ErrorDetail, want)
 	}
@@ -777,5 +781,126 @@ func TestAChoiceTheViewerDoesNotReachIsRemovedFromItsInput(t *testing.T) {
 			t.Errorf("%q was dropped; an unlabelled element takes the endpoint's "+
 				"policy, which this viewer reaches: %s", keep, got)
 		}
+	}
+}
+
+// A Section is a floor for its children, per call.
+//
+// The contract says a child may be labelled higher than its Section and never
+// lower, and lint C8 checks it — on a TEMPLATE. An override builds a card in
+// Go, has no template to lint, and reaches a viewer all the same. So the same
+// rule is enforced at render time, which is the only place every card passes
+// through whatever built it.
+//
+// The leak it closes is specific: an endpoint at INTERNAL, a Section at
+// RESTRICTED + [financial], and a child inside it at INTERNAL. The child
+// clears the ENDPOINT floor, so floor 1 has nothing to say about it — and a
+// viewer at INTERNAL would be shown a fact from a section whose heading they
+// are not cleared to see.
+func TestAChildLabelledBelowItsSectionRefusesTheWholeCard(t *testing.T) {
+	files := cardFixture(t)
+	rec := &record.Memory{}
+	core := cardCore(t, files, rec, map[string]string{
+		cardQueueProcedure: `{"cards": [{
+      "kind": "TASK", "title": "Approve", "state": "OPEN",
+      "body": [
+        {"section": {"title": "Compliance", "elements": [
+          {"text": {"text": "adverse-media-hit"},
+           "access": {"clearance": "CLEARANCE_INTERNAL"}}
+        ]},
+         "access": {"clearance": "CLEARANCE_RESTRICTED", "compartments": ["financial"]}}
+      ]
+    }]}`,
+	})
+	// Deliberately a viewer who reaches EVERY label in the card. The refusal
+	// is not about this viewer: it is about a card whose own structure
+	// contradicts itself, and it would be the same refusal for anyone.
+	priya := viewer(t, core, "user:priya", toolv1.Clearance_CLEARANCE_RESTRICTED,
+		"financial", "compliance")
+	resp, err := core.Invoke(context.Background(), priya, cardQueueProcedure, emptyRef(t, files))
+	if err == nil {
+		t.Fatalf("a child labelled below its section was served: %s", textOf(t, resp))
+	}
+	if got := toolplane.CodeOfForTest(err); got != "internal" {
+		t.Errorf("code = %q, want internal (500)", got)
+	}
+	ev := rec.Events()
+	if len(ev) != 1 {
+		t.Fatalf("%d ledger rows, want 1", len(ev))
+	}
+	if ev[0].ErrorKind != toolplane.ErrorKindCardInvalid {
+		t.Errorf("error_kind = %q, want %q", ev[0].ErrorKind, toolplane.ErrorKindCardInvalid)
+	}
+	want := "card_invalid: label_below_section: cards[0].body[0].elements[0]"
+	if ev[0].ErrorDetail != want {
+		t.Errorf("error_detail = %q, want %q", ev[0].ErrorDetail, want)
+	}
+}
+
+// A child labelled HIGHER than its Section is the case the rule exists to
+// permit: one fact inside a compliance section that only the head of
+// compliance sees. It must be served, and withheld from whoever does not
+// reach it — not refused.
+func TestAChildLabelledAboveItsSectionIsProjectedAndNotRefused(t *testing.T) {
+	files := cardFixture(t)
+	core := cardCore(t, files, &record.Memory{}, map[string]string{
+		cardQueueProcedure: `{"cards": [{
+      "kind": "TASK", "title": "Approve", "state": "OPEN",
+      "body": [
+        {"section": {"title": "Compliance", "elements": [
+          {"text": {"text": "screening-was-run"},
+           "access": {"clearance": "CLEARANCE_RESTRICTED", "compartments": ["financial"]}},
+          {"text": {"text": "adverse-media-hit"},
+           "access": {"clearance": "CLEARANCE_RESTRICTED",
+                      "compartments": ["financial", "compliance"]}}
+        ]},
+         "access": {"clearance": "CLEARANCE_RESTRICTED", "compartments": ["financial"]}}
+      ]
+    }]}`,
+	})
+	amir := viewer(t, core, "user:amir", toolv1.Clearance_CLEARANCE_RESTRICTED, "financial")
+	resp, err := core.Invoke(context.Background(), amir, cardQueueProcedure, emptyRef(t, files))
+	if err != nil {
+		t.Fatalf("a child labelled above its section was refused: %v", err)
+	}
+	got := textOf(t, resp)
+	if strings.Contains(got, "adverse-media-hit") {
+		t.Errorf("the tighter child survived for a viewer without the compartment: %s", got)
+	}
+	if !strings.Contains(got, "screening-was-run") {
+		t.Errorf("the child at the section's own label was dropped: %s", got)
+	}
+}
+
+// An UNLABELLED child inside a labelled Section takes the SECTION's label,
+// not the endpoint's.
+//
+// That is the same sentence as "absent means the enclosing policy, never
+// PUBLIC", applied one level in. Without it a card could put an unlabelled
+// fact inside a compliance section and hand it to everyone the endpoint
+// admits — a leak by omission, which is the shape the floors exist for.
+func TestAnUnlabelledChildTakesItsSectionsLabel(t *testing.T) {
+	files := cardFixture(t)
+	core := cardCore(t, files, &record.Memory{}, map[string]string{
+		cardQueueProcedure: `{"cards": [{
+      "kind": "TASK", "title": "Approve", "state": "OPEN",
+      "body": [
+        {"section": {"title": "Compliance", "elements": [
+          {"text": {"text": "unlabelled-inside-compliance"}}
+        ]},
+         "access": {"clearance": "CLEARANCE_RESTRICTED",
+                    "compartments": ["financial", "compliance"]}}
+      ]
+    }]}`,
+	})
+	// Reaches the endpoint (PUBLIC) and not the section.
+	anyone := viewer(t, core, "user:anyone", toolv1.Clearance_CLEARANCE_PUBLIC)
+	resp, err := core.Invoke(context.Background(), anyone, cardQueueProcedure, emptyRef(t, files))
+	if err != nil {
+		t.Fatalf("the queue was refused: %v", err)
+	}
+	if strings.Contains(textOf(t, resp), "unlabelled-inside-compliance") {
+		t.Errorf("an unlabelled element inside a compliance section reached a "+
+			"viewer who cannot see the section: %s", textOf(t, resp))
 	}
 }

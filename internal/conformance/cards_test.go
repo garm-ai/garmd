@@ -54,12 +54,10 @@ func cardsCatalogue(t *testing.T) *catalogue.Catalogue {
 	t.Helper()
 
 	srcs := map[string]string{
-		"garm/tool/v1/tool.proto":   readTestdata(t, "testdata/tool.proto"),
 		"garm/card/v1/card.proto":   readTestdata(t, "testdata/card.proto"),
 		"bank/cards/v1/cards.proto": readTestdata(t, "testdata/cards.proto"),
 	}
 	paths := []string{
-		"garm/tool/v1/tool.proto",
 		"garm/card/v1/card.proto",
 		"bank/cards/v1/cards.proto",
 	}

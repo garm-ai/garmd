@@ -53,8 +53,8 @@ github.com/brianvoe/gofakeit/v6 v6.28.0/go.mod h1:Xj58BMSnFqcn/fAQeSK+/PLtC5kSb7
 github.com/bufbuild/protocompile v0.14.1 h1:iA73zAf/fyljNjQKwYzUHD6AD4R8KMasmwa/FBatYVw=
 github.com/bufbuild/protocompile v0.14.1/go.mod h1:ppVdAIhbr2H8asPk6k4pY7t9zB1OU5DoEw9xY/FUi1c=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
-github.com/garm-ai/garm v0.14.2 h1:QAVAFzd4EpBHVNPjVWdwKWCWkl6BOWLgjPQBcBoL2Wo=
-github.com/garm-ai/garm v0.14.2/go.mod h1:6XZkE7k/Z4N5G/CHYYj93pvidwkhMU11bFz/Z+Cnyxg=
+github.com/garm-ai/garm v0.17.0 h1:ea6/+3vapcfB7ORmC4pIJcNYKeu7A3iQA+R0YgTX4tk=
+github.com/garm-ai/garm v0.17.0/go.mod h1:/v5su3RO1jDeG3E0u1d9QAG3gv4JzbvY761QL7jf9V8=
 github.com/go-jose/go-jose/v4 v4.1.5 h1:RjgjO2LOtWOJKUC5wpwY9LR3B3vwVAz6JS2YHfYU6eA=
 github.com/go-jose/go-jose/v4 v4.1.5/go.mod h1:x4oUasVrzR7071A4TnHLGSPpNOm2a21K9Kf04k1rs08=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=

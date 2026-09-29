@@ -33,9 +33,8 @@ import (
 func audienceHandler(t *testing.T, p *toolplane.Principal) *Handler {
 	t.Helper()
 	cat := fixtureCatalogue(t, map[string]string{
-		"garm/tool/v1/tool.proto":         readServeTestdata(t, "testdata/tool.proto"),
 		"bank/payments/v1/audience.proto": readServeTestdata(t, "testdata/audience.proto"),
-	}, "garm/tool/v1/tool.proto", "bank/payments/v1/audience.proto")
+	}, "bank/payments/v1/audience.proto")
 
 	h := chained(&Handler{
 		Store:      &countingStore{c: cat},
@@ -298,9 +297,8 @@ func TestTheAgentBearingCatalogueListsUnchangedByAudience(t *testing.T) {
 // malformed catalogue loadable.
 func TestTheAudienceFixtureStillLoadsThroughTheOrdinaryLoader(t *testing.T) {
 	cat := fixtureCatalogue(t, map[string]string{
-		"garm/tool/v1/tool.proto":         readServeTestdata(t, "testdata/tool.proto"),
 		"bank/payments/v1/audience.proto": readServeTestdata(t, "testdata/audience.proto"),
-	}, "garm/tool/v1/tool.proto", "bank/payments/v1/audience.proto")
+	}, "bank/payments/v1/audience.proto")
 	if len(cat.Defs) != 5 {
 		t.Fatalf("%d tools, want 5", len(cat.Defs))
 	}

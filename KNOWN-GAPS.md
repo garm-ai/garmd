@@ -103,12 +103,16 @@ small catalogue against a bucket holding a large bad one carries both.
   `tool.proto` has no `audience` at all yields nothing, which reads as `AGENT`:
   the pre-audience behaviour, exactly.
 
-  `internal/catalogue/testdata/tool.proto` and `internal/serve/testdata/tool.proto`
-  are Track G's contract, copied, so the fixtures compile a tool declaring an
-  audience against a `tool.proto` this binary is older than — which is the
-  production arrangement. **When garm v0.17.0 lands and go.mod is bumped,
-  delete both copies** and let the fixtures compile against the linked
-  contract again.
+  garm v0.17.0 ships the field (`ToolPolicy.audience = 14`, a plain field —
+  the spec wrote `extend ToolPolicy`, which is impossible because `ToolPolicy`
+  declares no extension ranges), so the ordinary path is now the reflective
+  one and the fixtures compile against the linked contract.
+  `internal/catalogue/testdata/future_tool.proto` keeps the OTHER path
+  covered: it is v0.17.0's `tool.proto` with `audience` moved to field 40, so
+  the linked type has nothing there, the value survives in unknown bytes, and
+  the by-name lookup is the only thing that can find it. Deleting that fixture
+  deletes the only coverage of the mechanism that will let the next field ship
+  the same way.
 - **A grant's task reaches the ledger row.** The STS binds an approval to the
   task it was given on (cards-and-tasks design §7), so two tasks with the same
   material — the same payment asked twice — cannot share one grant. When the
@@ -238,36 +242,54 @@ small catalogue against a bucket holding a large bad one carries both.
   element's path in `error_detail`. A card whose own label the viewer misses
   is `not_found` unary and dropped from a page.
 
-  The type is also an OPAQUE LEAF to the field plan, and it has to be:
+  **A card is an opaque leaf to the FIELD plan**, and it has to be:
   `garm.card.v1` is recursive (`Element → Section → Element`) and its interior
-  carries no field policies at all, so `policy.Compile` refuses it outright.
-  `Core.compilePlan` mirrors policy's walk with one rule added — do not
-  descend into a card — and a response that IS a card gets an empty plan. That
-  mirror is the one piece of `garm/policy` this repository has a copy of, and
-  it exists only because `policy.Compile` offers no seam to stop at; everything
-  it decides is still policy's, called from here.
+  carries no field policies at all, so a `policy.Compile` that descended would
+  refuse it outright — a card-serving catalogue could not mount. Since garm
+  v0.17.0 `policy.IsOpaqueLeafMessage` names `garm.card.v1.Card` and
+  `policy.Compile` handles both the nested case and a response that IS a card
+  (an empty plan), so garmd calls it unchanged. Track D shipped an internal
+  mirror of that walk for one release because the seam did not exist; it is
+  gone.
 
-  ***The card vocabulary is a FIXTURE until garm v0.17.0.*** garm v0.16.0
-  ships `garm.card.v1` **without** `access` and without `Label` — Track G adds
-  them. garmd never links the package (CI asserts it): it matches the type by
+  The card WALK keeps its own descent rule (`cardChildOf`) rather than sharing
+  `policy.SubtreeOf`, deliberately: the two now want opposite things at a
+  card — the field plan stops there, the card walk is looking for it — and
+  sharing one predicate would make each release of garm's policy package a
+  silent change to which cards get projected, with the failure looking like a
+  card served whole. Taking v0.17.0 caught exactly that, as a red test.
+
+  **A Section is a floor per call, not only per template.** An element
+  labelled below the element that encloses it refuses the card
+  (`label_below_section`, or `label_below_element` when the container is not a
+  Section). Lint C8 checks the same rule at publish time and can only see a
+  TEMPLATE; a card an override built in Go has no template to lint and reaches
+  a viewer all the same, and the leak is specific — a child at INTERNAL inside
+  a RESTRICTED section clears the endpoint floor, so floor 1 has nothing to
+  say about it, and a reader who cannot see the heading would be shown what
+  was under it. An unlabelled child likewise takes its section's label, not
+  the endpoint's.
+
+  ***The card vocabulary is read, never linked.*** garmd matches the type by
   full name and reads `access` through protoreflect, by field NAME, checking
   the number against the design's fixed values (`Element.access` 10,
   `Fact.access` 4, `Choice.access` 3, `Card.access` 10; `Label.clearance` 1,
   `Label.compartments` 2). A pinned message whose `access` sits at a different
   number, or a `Card` carrying no recognisable `access` at all, **refuses the
   card** (`card_invalid`, the sentence naming the message and the numbers)
-  rather than reading as unlabelled: unlabelled means "read at the endpoint's
+  rather than reading as unlabelled: unlabelled means "read at the enclosing
   floor", which the caller has already passed, so a drifted contract that
   degraded to unlabelled would publish every element it had labelled. Refusing
   is the only fail-closed answer to a vocabulary this build has not met.
-  `internal/toolplane/testdata/card.proto` is where the assumed shape is
-  written down — a VERBATIM copy of Track G's `garm/card/v1/card.proto`, so
-  the pin is the contract rather than a guess at it — and
-  `TestTheCardFixturePinsTheFieldNumbersTheDesignFixes` is what holds it.
-  **When garm v0.17.0 lands, bump the module, replace that fixture with the
-  released file, and delete this paragraph;** every other test in
-  `cards_test.go` must pass unchanged, and if one does not, the contract moved
-  and the walk has to move with it.
+
+  Not linking it is a boundary CI asserts, so the tests cannot compile against
+  the real package either: `internal/toolplane/testdata/card.proto` and
+  `internal/conformance/testdata/card.proto` are **verbatim copies of garm
+  v0.17.0's `garm/card/v1/card.proto`**, and
+  `TestTheCardFixturePinsTheFieldNumbersTheDesignFixes` is what holds the
+  shape. **They are the one thing here that does not update itself: re-copy
+  both whenever `card.proto` changes.** The drift test catches a change to
+  `access`'s number or name and nothing else.
 - `internal/record` — where an event goes. Its SHAPE is in the contract,
   because a tool call and a generation call must produce one record type.
 - `internal/record/jetstream` — the ledger, batched onto `GARM_LEDGER`.
