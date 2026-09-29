@@ -165,6 +165,23 @@ Step 5 — human approval grants, single-use — is implemented, and `garmd serv
 and that is the configured answer rather than a hole: a MODE_GRANT catalogue
 then does not mount.
 
+**Reading a grant is `contracts/grants`; spending one is `internal/grants`.**
+Three processes have to agree about what a grant says — the STS that mints it,
+this daemon at the gate, and the tasks service deciding a task — and two of
+them cannot import `internal/`. So the claim reader, the canonical text of the
+values a grant binds, and the comparisons that follow from the token's format
+live in the contract. What stays here is a deployment's: the trusted issuers,
+this daemon's audience, the replay cache that makes a grant single-use, and
+the three sentinels that let a surface answer the right code.
+
+**garmd does not read `garm_grant.task`, deliberately**, and consolidating the
+reader must not have changed that. The service that knows which task is being
+decided is the one that opened it; the contract has `CheckTask` for that and
+this verifier never calls it. The claim reaches the ledger row as attribution
+and decides nothing, which
+`internal/grants`'s `TestTheClaimsGarmdChecksAreUnchanged` pins claim by
+claim.
+
 What is not implemented is instance authorization (steps 4 and 7) and notify
 (step 10) — and a catalogue declaring either **will not mount**, so this
 process refuses to start rather than serve a tool ungated while its schema says

@@ -1,3 +1,27 @@
+// Package grants is step 5: a tool declaring MODE_GRANT does not run until a
+// grant token says somebody senior enough agreed, recently enough, to these
+// values — and until that grant has not been spent before.
+//
+// What is HERE is spending one. What a grant IS — its claims, the canonical
+// text of the values it binds, and the comparisons that follow from the
+// token's format — is [github.com/garm-ai/contracts/grants], because three
+// processes have to agree about it: the STS that mints a grant, this daemon
+// that spends it at the gate, and the tasks service that must refuse a
+// decision whose grant names another task. Two of them cannot import this
+// package, and the one credential in the system that authorises an
+// irreversible act is the last place to let two readers drift apart.
+//
+// So this package keeps what is a DEPLOYMENT's rather than a token's: which
+// issuers are trusted and what this daemon calls itself, the replay cache
+// that makes a grant single-use, and the three sentinels below — which exist
+// so a surface can answer the right code and an operator is paged for the
+// right thing. The shared package has one kind of error; the difference
+// between "the caller's approval is bad", "the caller has no approval yet"
+// and "this deployment could not check" is three different next moves, and
+// deciding between them is a daemon's job.
+//
+// It also does not check the task claim, and that is the design. See
+// [grants.Claims.Task] and TestTheClaimsGarmdChecksAreUnchanged.
 package grants
 
 import (
@@ -10,6 +34,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/grants"
 	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/replay"
 	"github.com/garm-ai/garmd/internal/toolplane"
@@ -153,9 +178,12 @@ func (v *Verifier) verify(
 		return err
 	}
 	// Recorded BEFORE the checks, so a refused grant's binding reaches the
-	// ledger too. Nothing here reads it — see grantClaims.Task — and nothing
+	// ledger too. Nothing here reads it — see grants.Claims.Task, whose own
+	// comment says the daemon deliberately ignores it — and nothing
 	// downstream may: it is attribution, and a claim that could deny a call
-	// would be a second place to look when one is refused.
+	// would be a second place to look when one is refused. The tasks service
+	// is what checks a grant against the task it was given on, with
+	// CheckTask, which this verifier must never start calling.
 	toolplane.NoteGrantBinding(ctx, toolplane.GrantBinding{TaskID: cl.Task})
 
 	if err := v.checkShape(cl, p, t); err != nil {
@@ -193,7 +221,7 @@ func (v *Verifier) now() time.Time {
 	return time.Now()
 }
 
-func (v *Verifier) parse(ctx context.Context, raw string) (*grantClaims, error) {
+func (v *Verifier) parse(ctx context.Context, raw string) (*grants.Claims, error) {
 	sig, err := jose.ParseSigned(raw, authn.PermittedAlgorithms)
 	if err != nil {
 		return nil, fmt.Errorf("the grant is not a well-formed token: %w", err)
@@ -220,5 +248,5 @@ func (v *Verifier) parse(ctx context.Context, raw string) (*grantClaims, error) 
 	if err != nil {
 		return nil, fmt.Errorf("the grant's signature: %w", err)
 	}
-	return parseGrantClaims(payload)
+	return grants.ParseClaims(payload)
 }

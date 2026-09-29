@@ -221,13 +221,22 @@ large or one that would not unmarshal — produce no row and so carry no id.
 A successful answer also carries `Garm-Catalogue-Digest`, naming the catalogue
 that served it. Refusals do not carry it today.
 
-An approval may name the task it was given on — `garm_grant.task`, which is
-what stops the same payment asked twice sharing one grant. garmd records it on
-the ledger row as the `task_id` tag, whether the grant verified or not, and
-checks nothing about it: the thing that knows which task is being decided is
-the caller that opened it, and a check here would have nothing to compare
-against but itself. What matters from this side is that a claim garmd does not
-read cannot fail a grant.
+An approval may name the task it was given on — `garm_grant.task`, and only
+that spelling, which is what stops the same payment asked twice sharing one
+grant. garmd records it on the ledger row as the `task_id` tag, whether the
+grant verified or not, and checks nothing about it: the thing that knows which
+task is being decided is the caller that opened it, and a check here would
+have nothing to compare against but itself. What matters from this side is
+that a claim garmd does not read cannot fail a grant.
+
+Reading a grant at all is
+[`garm-ai/contracts`](https://github.com/garm-ai/contracts)' `grants` package,
+not this one. The STS mints a grant, garmd spends it, and the tasks service
+decides a task against it; three readers of one credential is three chances to
+disagree about the digest that says which values a human approved, so there is
+one reader. What garmd keeps is what is a deployment's rather than a token's —
+the trusted issuers, its own audience, and the replay cache that makes an
+approval single-use.
 
 Going the other way, the NATS hop carries `Garm-Invocation`: what the caller
 asserts — subject and kind, the delegation chain, tenant, correlation id, the
