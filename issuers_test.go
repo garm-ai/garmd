@@ -1,4 +1,4 @@
-package main
+package garmd
 
 import (
 	"context"
@@ -111,11 +111,11 @@ func TestARepeatedJWKSHasNoUnambiguousGrantDefault(t *testing.T) {
 
 	// Two --jwks and no --grant-jwks: nothing to default to, and refused at
 	// startup rather than guessed.
-	if got := grantJWKS(serveOpts{jwksURLs: two}); got != "" {
+	if got := grantJWKS(Config{JWKSURLs: two}); got != "" {
 		t.Errorf("grant JWKS = %q, want none: with two --jwks there is no pair to read", got)
 	}
-	err := checkGrantFlags(serveOpts{
-		jwksURLs: two, audience: "garm", grantIssuer: "https://sts.example.com",
+	err := checkGrantFlags(Config{
+		JWKSURLs: two, Audience: "garm", GrantIssuer: "https://sts.example.com",
 	})
 	if err == nil {
 		t.Fatal("a repeated --jwks with no --grant-jwks was accepted; approvals would be " +
@@ -128,21 +128,21 @@ func TestARepeatedJWKSHasNoUnambiguousGrantDefault(t *testing.T) {
 	}
 
 	// One --jwks: the ordinary deployment, and it still defaults.
-	one := serveOpts{jwksURLs: two[:1], audience: "garm", grantIssuer: "https://sts.example.com"}
-	if got := grantJWKS(one); got != one.jwksURLs[0] {
-		t.Errorf("grant JWKS = %q, want the only --jwks %q", got, one.jwksURLs[0])
+	one := Config{JWKSURLs: two[:1], Audience: "garm", GrantIssuer: "https://sts.example.com"}
+	if got := grantJWKS(one); got != one.JWKSURLs[0] {
+		t.Errorf("grant JWKS = %q, want the only --jwks %q", got, one.JWKSURLs[0])
 	}
 	if err := checkGrantFlags(one); err != nil {
 		t.Errorf("the one-pair deployment was refused: %v", err)
 	}
 
 	// An explicit --grant-jwks wins, however many --jwks there are.
-	o := serveOpts{jwksURLs: two, audience: "garm", grantIssuer: "https://sts.example.com",
-		grantJWKS: "https://sts.example.com/jwks.json"}
-	if got := grantJWKS(o); got != o.grantJWKS {
-		t.Errorf("grant JWKS = %q, want the explicit %q", got, o.grantJWKS)
+	cfg := Config{JWKSURLs: two, Audience: "garm", GrantIssuer: "https://sts.example.com",
+		GrantJWKS: "https://sts.example.com/jwks.json"}
+	if got := grantJWKS(cfg); got != cfg.GrantJWKS {
+		t.Errorf("grant JWKS = %q, want the explicit %q", got, cfg.GrantJWKS)
 	}
-	if err := checkGrantFlags(o); err != nil {
+	if err := checkGrantFlags(cfg); err != nil {
 		t.Errorf("an explicit --grant-jwks alongside two --jwks was refused: %v", err)
 	}
 }
@@ -152,21 +152,21 @@ func TestARepeatedJWKSHasNoUnambiguousGrantDefault(t *testing.T) {
 // off, a MODE_GRANT catalogue will not mount, and there is nothing for a
 // --grant-jwks to be ambiguous about.
 func TestTwoIssuersWithoutAGrantIssuerStillStart(t *testing.T) {
-	o := serveOpts{
-		issuers: []string{"https://idp.example.com", "https://sts.example.com"},
-		jwksURLs: []string{"https://idp.example.com/jwks.json",
+	cfg := Config{
+		Issuers: []string{"https://idp.example.com", "https://sts.example.com"},
+		JWKSURLs: []string{"https://idp.example.com/jwks.json",
 			"https://sts.example.com/jwks.json"},
-		audience: "garm",
+		Audience: "garm",
 	}
-	// The pairing itself must be accepted first, as runServe does, or this
+	// The pairing itself must be accepted first, as Serve does, or this
 	// test would pass for a config the daemon refuses one line earlier.
-	if _, err := trustedIssuers(o.issuers, o.jwksURLs); err != nil {
+	if _, err := trustedIssuers(cfg.Issuers, cfg.JWKSURLs); err != nil {
 		t.Fatalf("two paired issuers were refused: %v", err)
 	}
-	if err := checkGrantFlags(o); err != nil {
+	if err := checkGrantFlags(cfg); err != nil {
 		t.Fatalf("a two-issuer deployment with no --grant-issuer was refused: %v", err)
 	}
-	v, _, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), o)
+	v, _, err := grantVerifier(context.Background(), nil, gatedCatalogue(t), cfg)
 	if err != nil {
 		t.Fatalf("grantVerifier: %v", err)
 	}

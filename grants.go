@@ -1,4 +1,4 @@
-package main
+package garmd
 
 import (
 	"context"
@@ -28,14 +28,14 @@ import (
 // The ISSUER is what turns it on, not a boolean. A verifier needs someone to
 // trust, and there is no sensible default for who signs a human's approval.
 func grantVerifier(
-	ctx context.Context, nc *nats.Conn, cat *catalogue.Catalogue, o serveOpts,
+	ctx context.Context, nc *nats.Conn, cat *catalogue.Catalogue, cfg Config,
 ) (toolplane.GrantVerifier, func(*catalogue.Catalogue) error, error) {
 	// Before the early return, so two of the three flags given without the
 	// third is an error rather than a value that does nothing.
-	if err := checkGrantFlags(o); err != nil {
+	if err := checkGrantFlags(cfg); err != nil {
 		return nil, nil, err
 	}
-	if o.grantIssuer == "" {
+	if cfg.GrantIssuer == "" {
 		return nil, nil, nil
 	}
 
@@ -49,7 +49,7 @@ func grantVerifier(
 	// The cache must outlast the longest approval the catalogue declares, and
 	// after checkGrantCeilings that number is always positive when the
 	// catalogue declares a gated tool at all.
-	// A guard, not a case anyone configures: runServe always has a live
+	// A guard, not a case anyone configures: Serve always has a live
 	// connection here. It exists because the JetStream client dereferences a
 	// nil connection rather than returning an error, so without this a
 	// misordered construction is a panic at startup instead of a sentence.
@@ -88,9 +88,9 @@ func grantVerifier(
 	}
 
 	return &grants.Verifier{
-		Keys:     authn.NewKeySet(authn.KeySetConfig{URL: grantJWKS(o)}),
-		Issuers:  []string{o.grantIssuer},
-		Audience: grantAudience(o),
+		Keys:     authn.NewKeySet(authn.KeySetConfig{URL: grantJWKS(cfg)}),
+		Issuers:  []string{cfg.GrantIssuer},
+		Audience: grantAudience(cfg),
 		Spent:    spent,
 		// The token path's tolerance, by NAME rather than by a literal that
 		// happens to match it. Zero here would mean an approval one second
@@ -204,13 +204,13 @@ func checkGrantCeilings(cat *catalogue.Catalogue) error {
 // that one does not refuse anything at runtime: it would verify approvals
 // against whichever key set happened to be written first, which is a hole
 // rather than an outage.
-func checkGrantFlags(o serveOpts) error {
-	if o.grantIssuer == "" {
+func checkGrantFlags(cfg Config) error {
+	if cfg.GrantIssuer == "" {
 		var given []string
-		if o.grantJWKS != "" {
+		if cfg.GrantJWKS != "" {
 			given = append(given, "--grant-jwks")
 		}
-		if o.grantAudience != "" {
+		if cfg.GrantAudience != "" {
 			given = append(given, "--grant-audience")
 		}
 		if len(given) > 0 {
@@ -228,18 +228,18 @@ func checkGrantFlags(o serveOpts) error {
 	// grant verifier cannot tell — it checks the issuer against its allowlist
 	// and the signature against the key set it was handed, so a first entry
 	// able to answer that URL signs approvals for every issuer on the list.
-	if o.grantJWKS == "" && len(o.jwksURLs) > 1 {
+	if cfg.GrantJWKS == "" && len(cfg.JWKSURLs) > 1 {
 		return fmt.Errorf("--grant-issuer is set and --jwks is given %d times: a repeated "+
 			"--jwks has no unambiguous default for --grant-jwks, and taking the first "+
 			"would verify approvals against a key set that may not be the grant "+
 			"issuer's. Name it: --grant-jwks <the key set that signs approvals>",
-			len(o.jwksURLs))
+			len(cfg.JWKSURLs))
 	}
-	if grantJWKS(o) == "" {
+	if grantJWKS(cfg) == "" {
 		return fmt.Errorf("--grant-issuer is set and there is no key set to verify its " +
 			"approvals against: give --grant-jwks, or a single --jwks for it to default to")
 	}
-	if grantAudience(o) == "" {
+	if grantAudience(cfg) == "" {
 		return fmt.Errorf("--grant-issuer is set and there is no audience an approval " +
 			"must name: give --grant-audience, or --audience for it to default to. A " +
 			"grant minted for another deployment is a VALID grant, and the audience is " +
@@ -258,9 +258,9 @@ func checkGrantFlags(o serveOpts) error {
 // The JWKS default holds only while there is ONE --jwks. An audience is a
 // single value however many issuers there are, so grantAudience has nothing to
 // choose between; a key set does, and choosing wrong is not a refusal.
-func grantJWKS(o serveOpts) string {
-	if o.grantJWKS != "" {
-		return o.grantJWKS
+func grantJWKS(cfg Config) string {
+	if cfg.GrantJWKS != "" {
+		return cfg.GrantJWKS
 	}
 	// Exactly one --jwks, or nothing. One is the pair the operator wrote and
 	// there is nothing to guess. Several and the first is a GUESS, and the
@@ -271,17 +271,17 @@ func grantJWKS(o serveOpts) string {
 	// cross-signing hole the token path closes, reopened one flag over — and
 	// approvals come from the STS, which is rarely the first --jwks written.
 	// checkGrantFlags refuses the ambiguity instead.
-	if len(o.jwksURLs) == 1 {
-		return o.jwksURLs[0]
+	if len(cfg.JWKSURLs) == 1 {
+		return cfg.JWKSURLs[0]
 	}
 	return ""
 }
 
-func grantAudience(o serveOpts) string {
-	if o.grantAudience != "" {
-		return o.grantAudience
+func grantAudience(cfg Config) string {
+	if cfg.GrantAudience != "" {
+		return cfg.GrantAudience
 	}
-	return o.audience
+	return cfg.Audience
 }
 
 // longestGrantAge is the largest max_grant_age any GATED tool declares.
