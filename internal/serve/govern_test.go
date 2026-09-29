@@ -199,7 +199,19 @@ func TestEveryOutcomeIsLedgered(t *testing.T) {
 				t.Error("no ledger row; a call that happened and left no trace is the " +
 					"failure this whole design is against")
 			}
+			assertEveryRowNamesThePlane(t, rec)
 		})
+	}
+}
+
+// assertEveryRowNamesThePlane is the lake's own requirement: a row with no
+// `app` lands under `app=`, the partition nobody queries.
+func assertEveryRowNamesThePlane(t *testing.T, rec *record.Memory) {
+	t.Helper()
+	for _, ev := range rec.Events() {
+		if ev.App != toolplane.AppName {
+			t.Errorf("row %s (outcome %s) has app %q, want %q", ev.ID, ev.Outcome, ev.App, toolplane.AppName)
+		}
 	}
 }
 

@@ -714,6 +714,19 @@ func (c *Core) auditOutcome(ctx context.Context, t ToolDef, ev ledger.Event) {
 	}
 }
 
+// AppName is the ledger's `app` on every row this process writes.
+//
+// `app` is the plane that WROTE the row, not the tool it is about. The
+// sink partitions the lake by (date, app) and the JetStream subject is
+// `garm.v1.ledger.<tenant>.<app>` (contracts/wire.LedgerSubjectFor), so it
+// is the axis a consumer filters a whole plane's rows on — agentd writes its
+// rows under "agentd" and garmd's landed under `app=` with nothing in it,
+// which is the partition nobody queries. The declaring service is not the
+// right value: it is already on the row, as the package prefix of `tool`,
+// and it would spread one plane's rows over one partition per catalogue
+// package, which is the join the column exists to avoid.
+const AppName = "garmd"
+
 // newEvent opens the one ledger row this call will produce.
 //
 // Attribution is recorded for every outcome, not just successful ones —
@@ -724,6 +737,7 @@ func (c *Core) auditOutcome(ctx context.Context, t ToolDef, ev ledger.Event) {
 // row after a rebuild (spec §9).
 func (c *Core) newEvent(p *Principal, procedure string) ledger.Event {
 	ev := ledger.Event{
+		App: AppName,
 		// The id belongs to the CALL and is minted here, where the call is
 		// first observed, because everything downstream dedupes on it.
 		// Delivery to the lake is at-least-once, so a redelivered event has

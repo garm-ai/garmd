@@ -267,6 +267,7 @@ func TestASignedTokenReachesTheToolOverARealHop(t *testing.T) {
 	if len(rec.Events()) == 0 {
 		t.Error("a call crossed the whole stack and left no ledger row")
 	}
+	assertEveryRowNamesThePlane(t, rec)
 }
 
 // The same stack, with no credential. The distinction that matters is not the
@@ -331,6 +332,7 @@ func TestAnUnderClearedButValidTokenNeverReachesTheTool(t *testing.T) {
 		t.Error("a refusal left no ledger row; the refused calls are the ones an " +
 			"auditor most wants to see")
 	}
+	assertEveryRowNamesThePlane(t, rec)
 }
 
 // int32Counter counts tool invocations across goroutines. The subscriber runs
@@ -380,6 +382,7 @@ func TestAToolsCodedRefusalCrossesTheHopAsARefusal(t *testing.T) {
 				t.Errorf("row = outcome %q kind %q detail %q; want denied, tool_refused, the tool's words",
 					ev.Outcome, ev.ErrorKind, ev.ErrorDetail)
 			}
+			assertEveryRowNamesThePlane(t, rec)
 		})
 	}
 }

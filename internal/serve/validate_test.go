@@ -459,6 +459,7 @@ func TestAViolationOnAnAdmittedFieldNamesTheFieldAndTheRule(t *testing.T) {
 			if ev.ErrorDetail != wantDetail {
 				t.Errorf("error_detail = %q, want %q", ev.ErrorDetail, wantDetail)
 			}
+			assertEveryRowNamesThePlane(t, rec)
 		})
 	}
 }

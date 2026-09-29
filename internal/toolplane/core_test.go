@@ -669,3 +669,26 @@ func TestADirectCallLeavesTheExecutionSubjectEmpty(t *testing.T) {
 		t.Errorf("ExecutionSubject = %q for a direct call", got)
 	}
 }
+
+// Every row this process writes says which plane wrote it. The lake is
+// partitioned by app, and a row with none lands under `app=`, the partition
+// nobody queries. All three terminal shapes: a success, a refusal the chain
+// decided, and step 1's refusal, which is recorded outside Invoke.
+func TestEveryLedgerRowNamesThisPlaneAsItsApp(t *testing.T) {
+	rec := &record.Memory{}
+	core := testCore(t, rec, okResolver)
+
+	_, _ = core.Invoke(context.Background(), testPrincipal(toolv1.Clearance_CLEARANCE_RESTRICTED), testProcedure, testRequest())
+	_, _ = core.Invoke(context.Background(), testPrincipal(toolv1.Clearance_CLEARANCE_PUBLIC), testProcedure, testRequest())
+	_ = core.Unauthenticated(context.Background(), testProcedure, errors.New("no token"))
+
+	events := rec.Events()
+	if len(events) != 3 {
+		t.Fatalf("%d ledger rows, want 3", len(events))
+	}
+	for _, ev := range events {
+		if ev.App != "garmd" {
+			t.Errorf("row %s (outcome %s) has app %q, want garmd", ev.ID, ev.Outcome, ev.App)
+		}
+	}
+}

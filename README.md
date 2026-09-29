@@ -21,7 +21,10 @@ Adding a tool is a catalogue rebuild rather than a release of this binary —
 and for an `s3://` catalogue, without a restart either; a file catalogue still
 needs one. Identity is the pair `(binary version, catalogue digest)`, reported
 at startup and on every ledger event, so *which tools
-is this process serving* stays exactly answerable.
+is this process serving* stays exactly answerable. Every ledger row also
+carries `app: garmd` — the plane that wrote it, the same way agentd's rows say
+`agentd` — because the lake is partitioned by `(date, app)` and a row with
+none lands under `app=`; the tool a row is about is its own column.
 
 **An `s3://` catalogue is reloaded without a restart, or refused.**
 `--catalogue-poll` (30s by default, `0` to turn it off) checks the object's

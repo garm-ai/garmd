@@ -160,6 +160,17 @@ small catalogue against a bucket holding a large bad one carries both.
   two are never left disagreeing for longer than those two lines — and a
   generation that was refused leaves the old taxonomy exactly where it was. A
   Config naming both a registry and a source is refused rather than resolved.
+- **`app: garmd` on every row.** `toolplane.AppName` is set in `newEvent`,
+  so every row the chain writes — successes, every refusal it decides, and
+  step 1's — names the plane that wrote it, which is what the lake partitions
+  on (`PARTITION_BY (date, app)` in sink's Parquet writer) and what the
+  JetStream subject carries (`garm.v1.ledger.<tenant>.<app>`). Rows used to
+  carry an empty `app` and landed under `app=` beside agentd's `app=agentd`.
+  The plane, not the declaring service: the service is already the package
+  prefix of `tool`, and one partition per catalogue package is the join the
+  column exists to avoid. Neither the ledger contract nor sink's README names
+  a rule; sink's writer and agentd's recorder both treat `app` as the writer,
+  so garmd does too.
 - `internal/record` — where an event goes. Its SHAPE is in the contract,
   because a tool call and a generation call must produce one record type.
 - `internal/record/jetstream` — the ledger, batched onto `GARM_LEDGER`.
