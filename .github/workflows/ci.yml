@@ -132,6 +132,34 @@ jobs:
           done
           echo "ok: garmd is agent-blind, untagged or under -tags conformance"
 
+      # garmd knows the CARD as a type, by full name, and never as an import.
+      #
+      # Step 8 projects garm.card.v1.Card (internal/toolplane/sanitise.go) by
+      # matching the message's full name and reading `access` off the value
+      # through protoreflect. Linking the contract would be a different thing:
+      # a build-time dependency on a vocabulary this daemon is supposed to be
+      # able to meet as bytes, and the first step towards reading the rest of
+      # it — the kinds, the templates — because it would be there. The fixture
+      # at internal/toolplane/testdata/card.proto is what the assumption is
+      # pinned against instead.
+      #
+      # Tests included, because the card tests are precisely where importing
+      # the real type would be most tempting.
+      - name: no dependency on the card contracts
+        run: |
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps -test ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/garm/contracts/garm/card'; then
+              echo "::error::garmd links the card contracts; it knows the type by NAME (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: garmd knows garm.card.v1.Card by name and links nothing of it"
+
       # The embedded NATS server is a TEST dependency and must stay one.
       #
       # It is in go.mod because the transport and stream tests run against a

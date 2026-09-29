@@ -171,6 +171,47 @@ small catalogue against a bucket holding a large bad one carries both.
   column exists to avoid. Neither the ledger contract nor sink's README names
   a rule; sink's writer and agentd's recorder both treat `app` as the writer,
   so garmd does too.
+- **Card projection at step 8** (`internal/toolplane/sanitise.go`). A response
+  that is a `garm.card.v1.Card`, or carries one in a field or a repeated
+  field, is walked after the field plan: every element, fact and choice with
+  an `access` label the viewer does not reach is removed, the path (or a
+  `Fact.field`) named in the card's `disclosure.withheld_fields` and counted
+  on the ledger row beside the field redactions. An unlabelled element is read
+  at the endpoint's own policy and never at PUBLIC; one labelled BELOW it
+  refuses the whole call, 500, with `error_kind: card_invalid` and the
+  element's path in `error_detail`. A card whose own label the viewer misses
+  is `not_found` unary and dropped from a page.
+
+  The type is also an OPAQUE LEAF to the field plan, and it has to be:
+  `garm.card.v1` is recursive (`Element → Section → Element`) and its interior
+  carries no field policies at all, so `policy.Compile` refuses it outright.
+  `Core.compilePlan` mirrors policy's walk with one rule added — do not
+  descend into a card — and a response that IS a card gets an empty plan. That
+  mirror is the one piece of `garm/policy` this repository has a copy of, and
+  it exists only because `policy.Compile` offers no seam to stop at; everything
+  it decides is still policy's, called from here.
+
+  ***The card vocabulary is a FIXTURE until garm v0.17.0.*** garm v0.16.0
+  ships `garm.card.v1` **without** `access` and without `Label` — Track G adds
+  them. garmd never links the package (CI asserts it): it matches the type by
+  full name and reads `access` through protoreflect, by field NAME, checking
+  the number against the design's fixed values (`Element.access` 10,
+  `Fact.access` 4, `Choice.access` 3, `Card.access` 10; `Label.clearance` 1,
+  `Label.compartments` 2). A pinned message whose `access` sits at a different
+  number, or a `Card` carrying no recognisable `access` at all, **refuses the
+  card** (`card_invalid`, the sentence naming the message and the numbers)
+  rather than reading as unlabelled: unlabelled means "read at the endpoint's
+  floor", which the caller has already passed, so a drifted contract that
+  degraded to unlabelled would publish every element it had labelled. Refusing
+  is the only fail-closed answer to a vocabulary this build has not met.
+  `internal/toolplane/testdata/card.proto` is where the assumed shape is
+  written down — a VERBATIM copy of Track G's `garm/card/v1/card.proto`, so
+  the pin is the contract rather than a guess at it — and
+  `TestTheCardFixturePinsTheFieldNumbersTheDesignFixes` is what holds it.
+  **When garm v0.17.0 lands, bump the module, replace that fixture with the
+  released file, and delete this paragraph;** every other test in
+  `cards_test.go` must pass unchanged, and if one does not, the contract moved
+  and the walk has to move with it.
 - `internal/record` — where an event goes. Its SHAPE is in the contract,
   because a tool call and a generation call must produce one record type.
 - `internal/record/jetstream` — the ledger, batched onto `GARM_LEDGER`.

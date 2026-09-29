@@ -36,6 +36,21 @@ exists only inside the manifest — prompt digest, step bound, model alias, the
 tools it may call — appears anywhere in the body. Breaking the invariant fails
 there rather than in somebody's acceptance test.
 
+*The one type it does know:* `garm.card.v1.Card`. Step 8 walks a card's value
+and drops the elements whose `access` label the viewer does not reach
+(`internal/toolplane/sanitise.go`). **That is not agent-awareness, and the
+distinction is exact.** garmd knows a TYPE, the way it knows
+`google.protobuf.Timestamp` is a value rather than a structure to classify —
+not a tool, not an agent, not a task, and never an annotation: it reads a
+`Label` off the message and nothing else in the package, so it cannot tell an
+approval card from a start card, and the catalogue's version check is as
+narrow as it ever was. The reason the type has to be known at all is that
+inside it the policy is carried by the VALUE rather than by the descriptor: a
+queue of tasks cannot say in a `.proto` which row is whose. The card
+vocabulary is not linked either — `internal/toolplane/testdata/card.proto` is
+a fixture, the type is matched by full name, and CI asserts
+`garm/contracts/garm/card` stays out of the dependency graph.
+
 **3. The chain is not configurable.** Ten steps, fixed order. The moment it is a
 slice someone assembles, "is authorization applied?" stops being a structural
 fact. What is pluggable is *how* a step is implemented, never *whether* it runs.

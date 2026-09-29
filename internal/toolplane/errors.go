@@ -57,6 +57,18 @@ func (e *ToolRefusal) Message() string { return toolRefusals[e.Code].message }
 // ErrorKindToolRefused is the ledger's error_kind for a ToolRefusal row.
 const ErrorKindToolRefused = "tool_refused"
 
+// ErrorKindCardInvalid is the ledger's error_kind for floor 1 of the card
+// walk (cards-and-tasks design §3.2): a card element labelled BELOW the
+// endpoint's own policy.
+//
+// It is this daemon's own refusal and it is an INTERNAL error on the wire —
+// 500, a static body — because it is not the caller's fault and there is
+// nothing they can do about it. The tool served a card whose labels the
+// contract does not permit; the operator learns which element from the
+// ledger's error_detail and from the log, and the caller learns nothing,
+// because the path names an element they may not be entitled to know exists.
+const ErrorKindCardInvalid = "card_invalid"
+
 // toolRefusals is every code a tool may answer with and be understood — the
 // codes tool-go's toolbind.CodedError can carry — with the connect code the
 // chain classifies it as and the sentence the wire gets. A code not here

@@ -1,0 +1,39 @@
+// A tool that serves cards, as the cards-and-tasks design §2.1 has one.
+//
+// Two endpoints, because §3.1 names two shapes garmd must project: a response
+// that IS a Card (an approval card), and a response that carries a repeated
+// field of them (a queue). Their policies are the ones §10.3 walks through.
+syntax = "proto3";
+package bank.payments.v1;
+option go_package = "example.com/gen/bank_payments_v1;x";
+
+import "garm/card/v1/card.proto";
+import "garm/tool/v1/tool.proto";
+
+message Queue {
+  option (garm.tool.v1.default_field_policy) = { read: CLEARANCE_PUBLIC on_deny: { omit: {} } };
+  repeated garm.card.v1.Card cards  = 1;
+  string                     cursor = 2;
+}
+
+service PaymentsService {
+  // The endpoint of design §10.3: RESTRICTED, [financial].
+  rpc InitiatePaymentApprovalCard(garm.card.v1.TaskRef) returns (garm.card.v1.Card) {
+    option (garm.tool.v1.tool) = {
+      name: "initiate_payment_approval_card" title: "Approve a payment"
+      verb: VERB_READ min_clearance: CLEARANCE_RESTRICTED compartments: ["financial"]
+      approval: { mode: MODE_NONE }
+    };
+  }
+
+  // The queue: a page of cards, each labelled at its own task's predicate.
+  // PUBLIC on the method on purpose (design §4.1): who may see WHICH card is
+  // decided per card by its label, not per method.
+  rpc ListTasks(garm.card.v1.TaskRef) returns (Queue) {
+    option (garm.tool.v1.tool) = {
+      name: "list_tasks" title: "The queue"
+      verb: VERB_READ min_clearance: CLEARANCE_PUBLIC
+      approval: { mode: MODE_NONE }
+    };
+  }
+}

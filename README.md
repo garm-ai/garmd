@@ -189,6 +189,39 @@ who is calling it and a delegated call does not arrive looking direct. It
 carries assertions and never credentials: the caller's token does not cross
 this boundary in any form, and neither does clearance or compartments.
 
+### Cards are a type garmd projects
+
+Step 8 redacts a response field by field, from the policy its descriptor
+carries. That works for every answer whose shape is fixed at compile time and
+for no answer whose policy is per row — a queue of approval tasks, or a card
+built from another tool's material, cannot say in a `.proto` which row is
+whose.
+
+So garmd knows one message type by name: `garm.card.v1.Card`. Wherever a
+response is a card, or carries one in a field or a repeated field, step 8 walks
+the value after the field plan has run and applies one rule — every element,
+fact and choice carries an `access` label of a clearance and compartments, and
+the ones this viewer does not reach are **removed**, not masked, with their
+paths named in the card's own `disclosure.withheld_fields` and counted on the
+ledger row beside the field redactions. A card whose own label the viewer does
+not reach is `not_found` as a unary answer and simply absent from a page — the
+same closed answer a tool they may not see gets. A section all of whose
+children were withheld goes whole.
+
+Two things make that safe to hand a tool. An element with **no** label is read
+at the endpoint's own policy, never at PUBLIC — a handler that forgot to label
+something cannot thereby publish it. And an element labelled **below** the
+endpoint's own policy refuses the whole call with a 500 and `card_invalid` on
+the ledger row, naming the element: a card carrying a label looser than the
+gate it came through was built against a policy nobody checked, and serving
+the rest of it would mean trusting the labels that happen to look right.
+
+This is not garmd learning what a card means. It reads the label and nothing
+else — not the kinds, not the templates, not `card_role` — and it cannot tell
+an approval card from a start card. What it knows is a type, the way it already
+knows a `google.protobuf.Timestamp` is a value rather than a structure to
+classify.
+
 Steps 1, 2, 3, 6, 8 and 9 of the chain are implemented, and step 5 — human
 approval grants, single-use — is implemented and constructed when
 `--grant-issuer` is set. Instance authorization (steps 4 and 7) and notify

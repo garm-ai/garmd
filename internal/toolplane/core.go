@@ -57,6 +57,13 @@ type Core struct {
 	// it is safe and cheap to use as a map key directly.
 	plans map[protoreflect.MessageDescriptor]*policy.Plan
 
+	// cards marks the message types a garm.card.v1.Card is reachable from,
+	// so step 8 knows whether to run the card walk at all. Compiled once per
+	// descriptor beside the plan and memoised on first sight otherwise: a
+	// response whose live descriptor was never mounted must not skip the
+	// walk silently, so a miss computes rather than answering false.
+	cards map[protoreflect.MessageDescriptor]bool
+
 	// need is the compartment set each tool resolves to, keyed by route.
 	//
 	// Derived at mount, never declared — the registry turns declared
@@ -187,6 +194,7 @@ func NewCore(cfg CoreConfig) (*Core, error) {
 		grants:    cfg.Grants,
 		notifier:  cfg.Notifier,
 		plans:     map[protoreflect.MessageDescriptor]*policy.Plan{},
+		cards:     map[protoreflect.MessageDescriptor]bool{},
 		need:      map[string]policy.CompartmentSet{},
 		tools:     map[string]ToolDef{},
 		resolvers: map[string]registration{},
@@ -253,11 +261,12 @@ func (c *Core) AddTools(tools []ToolDef) error {
 			if _, ok := c.plans[md]; ok {
 				continue
 			}
-			plan, err := policy.Compile(md, c.reg)
+			plan, err := c.compilePlan(md)
 			if err != nil {
 				return fmt.Errorf("tool %q: %w", t.Name, err)
 			}
 			c.plans[md] = plan
+			c.cards[md] = containsCard(md)
 		}
 		need, err := c.reg.Set(t.Compartments)
 		if err != nil {
@@ -665,7 +674,7 @@ func (c *Core) invoke(
 	if resp, err = c.fgaPost(ctx, p, tool, resp, &ev); err != nil {
 		return nil, err
 	}
-	if err := c.sanitize(ctx, p, resp, &ev); err != nil {
+	if err := c.sanitize(ctx, p, tool, resp, &ev); err != nil {
 		return nil, err
 	}
 	ev.Outcome = ledger.OutcomeOK
@@ -1070,9 +1079,30 @@ func (c *Core) fgaPost(
 	return out, nil
 }
 
+// cardsIn reports whether a garm.card.v1.Card is reachable from md.
+//
+// Memoised on the descriptor, exactly as the plan is, so the answer is
+// computed once per catalogue generation and the WALK is what happens per
+// call (design §3.2). A descriptor this Core never mounted is computed rather
+// than answered false: a response type that arrived by some other route must
+// not skip the card walk simply because nobody pre-registered it.
+func (c *Core) cardsIn(md protoreflect.MessageDescriptor) bool {
+	c.mu.RLock()
+	has, known := c.cards[md]
+	c.mu.RUnlock()
+	if known {
+		return has
+	}
+	has = containsCard(md)
+	c.mu.Lock()
+	c.cards[md] = has
+	c.mu.Unlock()
+	return has
+}
+
 // sanitize is step 8: apply the resolved plan to the response.
 func (c *Core) sanitize(
-	ctx context.Context, p *Principal, resp proto.Message, ev *ledger.Event,
+	ctx context.Context, p *Principal, tool ToolDef, resp proto.Message, ev *ledger.Event,
 ) error {
 	// Amendment: the plan is looked up by the LIVE response descriptor —
 	// ProtoReflect().Descriptor() on the actual object the resolver returned
@@ -1097,6 +1127,33 @@ func (c *Core) sanitize(
 	// instead of with this one caller. resolved is derived from resp's own
 	// live descriptor five lines up, so the pairing holds by construction.
 	paths := policy.Sanitize(resp, resolved, redact.Ctx{Key: c.hashKey, Tenant: p.Tenant})
+
+	// The second half of step 8, for the one type garmd knows by name
+	// (cards-and-tasks design §3). It runs AFTER the field plan, over what
+	// the field plan left: a card the response's own field policy already
+	// dropped is not there to project.
+	if c.cardsIn(resp.ProtoReflect().Descriptor()) {
+		res := c.projectCards(p, tool, resp)
+		switch {
+		case res.invalid != "":
+			// Floor 1. The whole card, never a partial one: an element
+			// labelled below the endpoint's own policy means the card was
+			// built against a policy nobody checked, and serving the rest of
+			// it would be trusting the labels that happen to look right.
+			ev.Outcome = ledger.OutcomeError
+			ev.ErrorKind = ErrorKindCardInvalid
+			ev.ErrorDetail = ErrorKindCardInvalid + ": " + res.invalid
+			return errInternal
+		case res.gone:
+			// The viewer does not reach the card's own label. NotFound, the
+			// same closed answer step 2 gives for a tool they may not see,
+			// and for the same reason.
+			ev.ErrorDetail = "card withheld whole: the caller does not reach its access label"
+			return errNotFound
+		}
+		paths = append(paths, res.withheld...)
+	}
+
 	setRedactions(ctx, Redactions{Paths: paths, PlanHash: resolved.Hash})
 
 	// Ledger attribution (tools spec §9). Paths and the plan hash only — a
