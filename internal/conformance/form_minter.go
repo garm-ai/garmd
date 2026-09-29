@@ -45,11 +45,12 @@ import (
 // which one wins.
 //
 // devkit plays the role of that upstream IdP in this codebase's own
-// conformance run. Its *persona* endpoint (?user=) cannot be used for this,
-// though: it never attaches a tenant claim, which the STS's exchange
-// refuses to mint without (see exchange.go: "subject token carries no
-// tenant claim"). FormMinter therefore drives devkit's other, ad-hoc form —
-// GET <upstream>/token?sub=<identity>&tenant=<tenant> — which does attach
+// conformance run. Its *persona* endpoint (?user=) is not used for the STS
+// suite: a case there names its own subject, tenant and claims, and the
+// persona form would substitute the personas file's (devkit v0.1.0 attaches
+// that file's tenant; the STS refuses a subject token with none). FormMinter
+// therefore drives devkit's ad-hoc form —
+// GET <upstream>/token?sub=<identity>&tenant=<tenant> — which attaches
 // one. subjectUserParam's value becomes that request's sub, and the
 // reserved subjectTenantParam ("subject_tenant") becomes its tenant. Both
 // are consumed here and never forwarded to the STS's own POST body: neither
