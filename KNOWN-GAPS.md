@@ -6,6 +6,29 @@ repeats it goes stale in a way the code cannot.
 
 ## What nothing here checks
 
+**A discovery round that hears nothing cannot tell an empty plane from an
+unreachable one.** Discovery is a scatter-gather, so silence is the only thing
+a window can end on. `Services` marks a round incomplete when a reply was
+dropped, when the ceiling closed mid-collection, or when a service answered
+fewer instances than the enumeration counted — but a round in which NOTHING
+arrived is reported as a complete answer about an empty plane, because
+reporting it as incomplete would freeze the reconciler on a deployment that
+legitimately has nothing running. A broker that is up and refusing therefore
+still reads as "nothing is deployed". Closing it needs a second signal about
+the broker itself, not a longer window.
+
+**Per-service rounds are driven by the plane's own enumeration, not by the
+catalogue.** `$SRV.INFO.<name>` addresses a micro service by the name it
+registered, and micro validates that against `^[A-Za-z0-9\-_]+$` — never a
+proto FQN. `agentd` derives its name with `wire.MicroServiceName`, so it is
+predictable; `tool-go` takes whatever string the tool's author passes to
+`garmtool.New`, and the reference plane's services are called `web`,
+`accounts`, `payments`. So the catalogue cannot name the services it declares,
+and discovery asks `$SRV.PING` first to find out. The cost is a round trip per
+sweep. Closing it means `tool-go` naming its service from `wire`, or a
+catalogue that records the micro name — until then, driving the INFO rounds
+from the catalogue would silently discover nothing.
+
 **`Retention()` is an assertion, not a measurement.** The forwarder acks an
 audit message once it has flushed it onward, which deletes it, so the stream's
 own `MaxAge` is a buffer window of hours rather than the years a tool asks for

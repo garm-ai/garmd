@@ -96,6 +96,29 @@ a service.
 NATS implements both. The second adapter waits for a named trigger — an
 enterprise that cannot run NATS — not for a feeling that abstraction is tidy.
 
+**Discovery is two rounds, and it says when it could not hear.** `$SRV.PING`
+plane-wide enumerates which services are running and how many instances each
+has; then one `$SRV.INFO.<name>` per service, bounded concurrency, for the
+endpoints and the advertised descriptor hash. One plane-wide `$SRV.INFO` was
+what it used to be, and it put every instance of every service into one
+collection, so an over-replicated service could crowd out a healthy one's
+reply. Per-service rounds make the reply count one service's replica count,
+and make incompleteness per-service.
+
+`transport.Round` carries that: what answered, and which services were not
+heard in full. **An incomplete round may add a quarantine and may never lift
+one** — a mismatch is a positive observation a missing reply cannot produce,
+while lifting rests on silence, which a missing reply imitates exactly.
+
+**A third-party dependency, deliberately.**
+`github.com/synadia-io/orbit.go/natsext` — Synadia's, the NATS authors' own
+extension collection — supplies `RequestMany`. It is one file, requires only
+`nats.go` which this adapter already links, and it is here to remove a bug
+class: collection used to be a `ChanSubscribe` into a 64-message channel, and
+nats.go DISCARDS rather than blocks when such a channel is full. An iterator
+has no fixed buffer to overflow. Its stall timer is what usually ends a round
+now, so a fast plane no longer pays the whole window.
+
 The invocation hop carries `Garm-Invocation` beside the request: the caller's
 assertions, encoded by `contracts/callctx`. Assertions, never credentials —
 the token does not cross this boundary, and neither does clearance or

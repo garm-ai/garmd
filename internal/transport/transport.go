@@ -74,10 +74,77 @@ type Invoker interface {
 	Invoke(ctx context.Context, procedure string, req, resp proto.Message) error
 }
 
+// ErrIncompleteRound is a discovery round that could not be heard in full.
+//
+// It is NOT a failure: the replies that did arrive are good, and Round carries
+// them. What it withdraws is the licence to reason from SILENCE. A service
+// missing from an incomplete round may be gone or may simply not have been
+// heard, and the whole value of discovery is that garmd can say "declared but
+// unreachable" and mean it.
+//
+// Spelled as a sentinel so a caller can tell the two questions apart with
+// errors.Is: "this service did not answer" is a fact about the plane, and "I
+// could not hear the whole plane" is a fact about the round.
+var ErrIncompleteRound = errors.New("discovery round was incomplete")
+
+// Round is one discovery answer: what was heard, and what was not heard
+// well enough to reason from.
+//
+// The two are separate fields because they license different conclusions.
+// Services is positive evidence and is always usable — an instance that
+// answered answered. Enumeration and Partial are the boundaries of the
+// negative evidence, and negative evidence is what quarantines are lifted on.
+type Round struct {
+	// Services is every instance that answered, across every service heard.
+	Services []Service
+
+	// Enumeration is non-nil when the round could not establish the full set
+	// of services running on the plane — wrapping [ErrIncompleteRound].
+	//
+	// While it is set, ABSENCE MEANS NOTHING. A service missing from
+	// Services may be stopped or may simply never have been heard, and a
+	// caller that concludes the first is one dropped reply away from
+	// refusing a healthy tool.
+	Enumeration error
+
+	// Partial names the services whose own round was incomplete, and why —
+	// each wrapping [ErrIncompleteRound].
+	//
+	// The service was heard; some of its INSTANCES were not. That is enough
+	// to act on what was heard (an instance advertising the wrong contract
+	// is advertising the wrong contract) and not enough to clear a verdict,
+	// because the instance that would have contradicted it may be the one
+	// that went unheard.
+	Partial map[string]error
+}
+
+// ConcludesAbsence reports whether this round is evidence about what is NOT
+// running.
+//
+// False means the round heard an unknown amount of the plane, so a caller
+// must leave its previous verdicts standing rather than lift them.
+func (r Round) ConcludesAbsence() bool { return r.Enumeration == nil }
+
+// Complete reports whether name was heard in full, and so whether a verdict
+// about it may be cleared by this round.
+func (r Round) Complete(name string) bool {
+	if r.Enumeration != nil {
+		return false
+	}
+	_, partial := r.Partial[name]
+	return !partial
+}
+
 // Discoverer reports what is reachable.
 type Discoverer interface {
-	// Services returns every reachable instance, once.
-	Services(ctx context.Context) ([]Service, error)
+	// Services asks the plane what is running, once.
+	//
+	// The error is reserved for a round that could not be RUN — a closed
+	// connection, a cancelled caller. A round that ran and heard only part
+	// of the plane is a successful call returning an incomplete Round, and
+	// the distinction matters: the first says nothing about the plane, the
+	// second says something about part of it.
+	Services(ctx context.Context) (Round, error)
 
 	// Watch streams changes until ctx is done. A closed channel means the
 	// watch ended; an error on the channel means it ended badly, and the
