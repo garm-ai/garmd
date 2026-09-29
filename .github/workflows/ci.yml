@@ -109,9 +109,15 @@ jobs:
           echo "ok: garmd depends on no tool repository, untagged or under -tags conformance"
 
       # garmd does not know about agents. An agent's manifest is bytes it
-      # carries unread (see internal/catalogue/agentblind_test.go). Since garm
-      # v0.14 the agent contracts live in the garm module itself, so the
+      # carries unread (see internal/catalogue/agentblind_test.go). The agent
+      # contracts live in the contract module this daemon DOES link, so the
       # boundary above cannot see them; this one can, tests included.
+      #
+      # The path is github.com/garm-ai/contracts/garm/agent since the contract
+      # became its own module. It was garm/contracts/garm/agent while the
+      # contract was a directory inside the command line tool's repository,
+      # and a grep for a path nothing imports any more passes without
+      # asserting anything, which is worse than no check at all.
       #
       # Tests included (-test) and both tag sets, exactly as the minter check:
       # the agent-blind tests are the files most tempted to import the
@@ -125,7 +131,7 @@ jobs:
               echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
               exit 1
             fi
-            if echo "$deps" | grep -qE 'garm-ai/garm/contracts/garm/agent'; then
+            if echo "$deps" | grep -qE 'garm-ai/contracts/garm/agent'; then
               echo "::error::garmd reaches the agent contracts; it must stay agent-blind (tags=\"$tags\")" >&2
               exit 1
             fi
@@ -136,7 +142,11 @@ jobs:
       #
       # Step 8 projects garm.card.v1.Card (internal/toolplane/sanitise.go) by
       # matching the message's full name and reading `access` off the value
-      # through protoreflect. Linking the contract would be a different thing:
+      # through protoreflect. The package is
+      # github.com/garm-ai/contracts/garm/card since the contract became its
+      # own module; it was garm/contracts/garm/card before, and a grep for the
+      # old spelling would pass on a build that linked the new one.
+      # Linking the contract would be a different thing:
       # a build-time dependency on a vocabulary this daemon is supposed to be
       # able to meet as bytes, and the first step towards reading the rest of
       # it — the kinds, the templates — because it would be there. The fixture
@@ -153,7 +163,7 @@ jobs:
               echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
               exit 1
             fi
-            if echo "$deps" | grep -qE 'garm-ai/garm/contracts/garm/card'; then
+            if echo "$deps" | grep -qE 'garm-ai/contracts/garm/card'; then
               echo "::error::garmd links the card contracts; it knows the type by NAME (tags=\"$tags\")" >&2
               exit 1
             fi
@@ -198,6 +208,44 @@ jobs:
             fi
           done
           echo "ok: the embedded server is test-only and no storage client is linked, untagged or under -tags conformance"
+
+      # garmd decides and records; it STORES nothing a tool could ask it for.
+      #
+      # This is a design rule, not a dependency policy, which is why the
+      # failure message says so. A daemon with a database acquires state that
+      # outlives a request, and the next question is always whether that state
+      # is authoritative — at which point the proxy has become a second source
+      # of truth about what happened, competing with the ledger it publishes.
+      # The tasks service holds tasks, the runner holds runs, and this process
+      # holds neither.
+      #
+      # Where the line is drawn, and why there. `database/sql` is the choke
+      # point: a driver that follows the idiom is unusable without it, so one
+      # stdlib path catches the whole conventional ecosystem including drivers
+      # nobody has written yet. The named modules are the ones that get there
+      # WITHOUT it — pgx's native interface, the ORMs that own their own
+      # connection handling, and the migration runners, which arrive on their
+      # own and are the likeliest first step. Matching the module prefix
+      # rather than a version means a major bump does not silently reopen it.
+      #
+      # Tests included (-test), unlike the broker check below: the embedded
+      # NATS server is a deliberate test dependency and a SQL driver would
+      # never be one — a test that needs a database is this daemon growing a
+      # database. Fail-closed shape and both tag sets as above.
+      - name: no database, no migrations
+        run: |
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps -test ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE '^database/sql|jackc/pgx|lib/pq|go-sql-driver/mysql|mattn/go-sqlite3|modernc.org/sqlite|microsoft/go-mssqldb|gorm.io|entgo.io|uptrace/bun|jmoiron/sqlx|golang-migrate|pressly/goose|rubenv/sql-migrate|amacneil/dbmate'; then
+              echo "::error::garmd has acquired a database (tags=\"$tags\"). This is a design rule, not a dependency policy: garmd decides and records, and stores nothing a tool could ask it for. State that outlives a request makes this proxy a second source of truth about what happened, competing with the ledger. The tasks service holds tasks, the runner holds runs, and this process holds neither." >&2
+              exit 1
+            fi
+          done
+          echo "ok: no SQL driver, ORM or migration tool in the graph, untagged or under -tags conformance"
 
       # The tool-side runtime is what a tool service imports. A daemon
       # importing it would have the dependency backwards, and would drag the

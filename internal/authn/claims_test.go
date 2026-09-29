@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/contracts/policy"
 	"github.com/garm-ai/garmd/internal/authn"
 )
 

@@ -1,17 +1,18 @@
 // ===========================================================================
-// A FIXTURE, copied verbatim from garm's `proto/garm/card/v1/card.proto` as
-// Track G wrote it, and the thing garmd's card walk is tested against.
+// A FIXTURE, copied verbatim from `github.com/garm-ai/contracts`'
+// `proto/garm/card/v1/card.proto`, and the thing garmd's card walk is tested
+// against.
 //
-// garmd does NOT link `garm.card.v1`. It recognises the type by full name and
-// reads `access` off the value through protoreflect, so the only thing that
-// can go wrong is the shape assumed here drifting from the shape garm ships.
-// This file is where the assumption is written down; `cards_test.go` holds it.
+// garmd does NOT link `garm.card.v1` — CI refuses the dependency. It
+// recognises the type by full name and reads `access` off the value through
+// protoreflect, so the only thing that can go wrong is the shape assumed here
+// drifting from the shape the contract ships. This file is where the
+// assumption is written down; `cards_test.go` holds it.
 //
-// The garm module this repository builds against (v0.14.2, and v0.16.0 the
-// day it is bumped) does NOT carry `Label` or `access`: Track G adds them and
-// tags v0.17.0. **When it lands, replace this file with the released one** —
-// every test in cards_test.go must pass unchanged, and if one does not, the
-// contract moved and the walk has to move with it. See KNOWN-GAPS.md.
+// **When the contract's card.proto changes, replace this file with the
+// released one.** Every test in cards_test.go must pass unchanged, and if one
+// does not, the contract moved and the walk has to move with it. Nothing
+// compares the two automatically, which is the gap KNOWN-GAPS.md names.
 // ===========================================================================
 // The card vocabulary: what an inbox renders for one viewer at one moment,
 // and the template an author may declare beside a tool or an agent.
@@ -28,7 +29,7 @@
 // renderer. buf.yaml excuses this file from those two rules for that reason.
 syntax = "proto3";
 package garm.card.v1;
-option go_package = "github.com/garm-ai/garm/contracts/garm/card/v1;cardv1";
+option go_package = "github.com/garm-ai/contracts/garm/card/v1;cardv1";
 
 import "google/protobuf/descriptor.proto";
 import "garm/tool/v1/tool.proto";

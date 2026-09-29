@@ -2,7 +2,7 @@ package record
 
 import (
 	"context"
-	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/contracts/ledger"
 	"log/slog"
 )
 

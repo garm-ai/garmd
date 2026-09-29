@@ -24,7 +24,7 @@ package garm.tool.v1;
 
 import "google/protobuf/descriptor.proto";
 
-option go_package = "github.com/garm-ai/garm/contracts/garm/tool/v1;toolv1";
+option go_package = "github.com/garm-ai/contracts/garm/tool/v1;toolv1";
 
 // ---------------------------------------------------------------- classification
 

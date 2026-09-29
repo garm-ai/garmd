@@ -5,7 +5,10 @@ tools it may call, deciding on every call what passes and what the caller is
 allowed to see of the answer.
 
 A long-running process — systemd or Kubernetes starts it. The command line tool
-is [`garm`](https://github.com/garm-ai/garm).
+is [`garm`](https://github.com/garm-ai/garm), and the contract both of them read
+is [`garm-ai/contracts`](https://github.com/garm-ai/contracts) — the annotation
+vocabulary, the policy lattice, the ledger and wire shapes. That is the only
+garm-ai module this daemon builds against.
 
 Named for the hound that guards the gate in Norse myth, which is what this does.
 
@@ -82,7 +85,10 @@ deciding on.
 
 ## What is deliberately not here
 
-- **The annotations and the generator** — [`garm`](https://github.com/garm-ai/garm).
+- **The annotations** — [`garm-ai/contracts`](https://github.com/garm-ai/contracts),
+  the module this daemon links. **The generator that reads them** —
+  [`garm`](https://github.com/garm-ai/garm), which this daemon does not link at
+  all.
 - **Anything a tool service imports.** A tool must not be able to reach this
   code and attempt the chain locally; a second, unreviewed implementation of
   enforcement is the failure this boundary prevents.

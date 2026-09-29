@@ -7,7 +7,7 @@ import (
 	"buf.build/go/protovalidate"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/contracts/ledger"
 )
 
 // Input validation is a step of the chain, and it lives in the Core for the

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/contracts/ledger"
 
 	"github.com/garm-ai/garmd/internal/record"
 )

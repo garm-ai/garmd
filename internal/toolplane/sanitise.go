@@ -7,8 +7,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/policy"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/policy"
 )
 
 // The one type garmd knows by name.
@@ -36,8 +36,9 @@ const (
 // They are a SECOND opinion, not the lookup: every read below finds the field
 // by NAME and then checks that the number agrees, so a contract that renumbers
 // without renaming is caught rather than silently misread, and a contract that
-// renames is caught too. garm v0.16.0 ships neither `access` nor `Label`;
-// Track G adds both. See KNOWN-GAPS.md.
+// renames is caught too. The contract these are pinned against is
+// `github.com/garm-ai/contracts`, which this daemon deliberately does not
+// link — see KNOWN-GAPS.md.
 const (
 	fieldNumCardAccess    protoreflect.FieldNumber = 10
 	fieldNumElementAccess protoreflect.FieldNumber = 10
@@ -155,13 +156,13 @@ func reachesCard(md protoreflect.MessageDescriptor, seen map[protoreflect.FullNa
 // cardChildOf reports whether the card walk descends into fd, and into which
 // message.
 //
-// It is deliberately NOT policy.SubtreeOf. Since garm v0.17.0 that function
-// stops at a `garm.card.v1.Card`, because the FIELD PLAN treats a card as an
+// It is deliberately NOT policy.SubtreeOf. That function stops at a
+// `garm.card.v1.Card`, because the FIELD PLAN treats a card as an
 // opaque value — which is right, and is the half of the work this daemon
 // needed from the contract. The card walk is the other half and has the
 // opposite job: a card is precisely what it is looking for, so it has to
 // descend where the field plan stops. Sharing one predicate between the two
-// would make each release of garm's policy package a silent change to which
+// would make each release of the contract's policy package a silent change to which
 // cards get projected, and the failure would look like a card served whole.
 //
 // Well-known types are skipped for the ordinary reason: they hold no labels

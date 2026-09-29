@@ -5,7 +5,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 
 	"github.com/garm-ai/garmd/internal/tool"
 )
@@ -13,19 +13,22 @@ import (
 // Reading a tool's audience out of a catalogue this binary is older than.
 //
 // A tool declares what it is FOR — PERSON, AGENT, RUNNER (cards-and-tasks
-// design §2.5) — on `garm.tool.v1.ToolPolicy`. The garm this binary links
-// does not have that field yet; Track G adds it. Widening the go.mod and
-// waiting would be the obvious move and it is the wrong one, for the reason
-// this whole repository exists: **a catalogue is data.** Its descriptor set
-// carries the `tool.proto` it was built with, so the catalogue knows the
-// field even when the binary does not, and reading it from there is the same
-// inversion that lets a tool be added without a release.
+// design §2.5) — on `garm.tool.v1.ToolPolicy`. The contract this binary links
+// has the field today, at number 14, and this code does not read it from
+// there, which is the point. Waiting for a go.mod bump before a catalogue's
+// declaration can be read is the wrong move, for the reason this whole
+// repository exists: **a catalogue is data.** Its descriptor set carries the
+// `tool.proto` it was built with, so the catalogue knows a field even when
+// the binary does not, and reading it from there is the same inversion that
+// lets a tool be added without a release.
 //
 // So the number is found by NAME, in the catalogue's own descriptors, and the
-// VALUE is then read off the annotation — from the linked type's field when a
-// later garm gives it one, and from the unknown bytes the annotation carried
-// through the load when it does not. Track G may pick any field number it
-// likes; nothing here depends on the choice.
+// VALUE is then read off the annotation — from the linked type's field when
+// this binary has one, and from the unknown bytes the annotation carried
+// through the load when it does not. Nothing here depends on the number, and
+// `testdata/future_tool.proto` is the same declaration at field 40, which is
+// what keeps the unknown-bytes path exercised now that the linked contract
+// resolves the real one.
 //
 // The same read covers the two shapes the design leaves open: a plain field
 // on ToolPolicy, and an extension of it. Both are a field number on the same

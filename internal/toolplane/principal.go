@@ -2,8 +2,8 @@
 package toolplane
 
 import (
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/policy"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/policy"
 )
 
 // VerbSet is a bitset over Verb. Bit 0 (UNSPECIFIED) is never set, so an

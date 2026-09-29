@@ -19,7 +19,7 @@ import (
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/garm-ai/garm/contracts/grant"
+	"github.com/garm-ai/contracts/grant"
 )
 
 // Materialise reads the values a grant binds to.

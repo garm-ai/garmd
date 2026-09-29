@@ -5,7 +5,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 )
 
 // The refusals the chain itself produces.

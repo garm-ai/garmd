@@ -6,7 +6,7 @@ import (
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/contracts/policy"
 )
 
 // schemaKey identifies one projection.

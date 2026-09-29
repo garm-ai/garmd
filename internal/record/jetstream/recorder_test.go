@@ -15,9 +15,9 @@ import (
 	natsjs "github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
-	ledgerv1 "github.com/garm-ai/garm/contracts/garm/ledger/v1"
-	"github.com/garm-ai/garm/contracts/ledger"
-	"github.com/garm-ai/garm/contracts/wire"
+	ledgerv1 "github.com/garm-ai/contracts/garm/ledger/v1"
+	"github.com/garm-ai/contracts/ledger"
+	"github.com/garm-ai/contracts/wire"
 	"github.com/garm-ai/garmd/internal/record"
 	recordjs "github.com/garm-ai/garmd/internal/record/jetstream"
 )

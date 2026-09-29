@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	cataloguev1 "github.com/garm-ai/garm/contracts/garm/catalogue/v1"
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	cataloguev1 "github.com/garm-ai/contracts/garm/catalogue/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"

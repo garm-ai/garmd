@@ -13,8 +13,8 @@ import (
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	cataloguev1 "github.com/garm-ai/garm/contracts/garm/catalogue/v1"
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	cataloguev1 "github.com/garm-ai/contracts/garm/catalogue/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/toolplane"

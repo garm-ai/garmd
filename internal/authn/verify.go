@@ -9,7 +9,7 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 
-	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/contracts/policy"
 	"github.com/garm-ai/garmd/internal/toolplane"
 )
 

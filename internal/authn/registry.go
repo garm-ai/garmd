@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/contracts/policy"
 )
 
 // Compartments supplies the taxonomy a token's compartment names resolve

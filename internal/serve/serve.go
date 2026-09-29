@@ -38,8 +38,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/dynamicpb"
 
-	"github.com/garm-ai/garm/contracts/audit"
-	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/contracts/audit"
+	"github.com/garm-ai/contracts/ledger"
 	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/grants"

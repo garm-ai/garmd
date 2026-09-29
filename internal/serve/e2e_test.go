@@ -21,9 +21,9 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
-	"github.com/garm-ai/garm/contracts/ledger"
-	"github.com/garm-ai/garm/contracts/wire"
-	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/contracts/ledger"
+	"github.com/garm-ai/contracts/policy"
+	"github.com/garm-ai/contracts/wire"
 	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/toolplane"

@@ -15,7 +15,7 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/toolplane"
 )
@@ -27,11 +27,12 @@ import (
 // is an ordinary governed call and the projection happens where every other
 // projection happens.
 //
-// The card vocabulary is a FIXTURE (testdata/card.proto), not an import. garm
-// v0.16.0 ships `garm.card.v1` WITHOUT `access` and without `Label`; Track G
-// adds them. Pinning the shape here is what makes the assumption legible, and
-// TestTheCardFixturePinsTheFieldNumbersTheDesignFixes is what makes it fail
-// loudly when garm v0.17.0 replaces the fixture with the real file.
+// The card vocabulary is a FIXTURE (testdata/card.proto), not an import — CI
+// refuses a build dependency on `contracts/garm/card`, because garmd knows
+// this one type by NAME. The fixture is a byte copy of the contract's own
+// card.proto, and pinning the shape here is what makes the assumption
+// legible: TestTheCardFixturePinsTheFieldNumbersTheDesignFixes is what fails
+// loudly the next time the copy is refreshed and a number has moved.
 
 const (
 	cardApprovalProcedure = "/bank.payments.v1.PaymentsService/InitiatePaymentApprovalCard"
@@ -242,9 +243,9 @@ func textOf(t *testing.T, m proto.Message) string {
 
 // The field numbers §1.1 fixes, asserted against the fixture.
 //
-// This is the assumption the whole walk rests on, written down once. When
-// garm v0.17.0 ships `access`, testdata/card.proto is replaced by the real
-// file and this test is what says whether the numbers still agree.
+// This is the assumption the whole walk rests on, written down once. When the
+// contract's card.proto changes, testdata/card.proto is replaced with the
+// released file and this test is what says whether the numbers still agree.
 func TestTheCardFixturePinsTheFieldNumbersTheDesignFixes(t *testing.T) {
 	files := cardFixture(t)
 	for name, want := range map[string]protoreflect.FieldNumber{

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 )
 
 // Small readers over a decoded token body.

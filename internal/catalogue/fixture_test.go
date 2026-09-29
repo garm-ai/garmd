@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/bufbuild/protocompile"
-	cataloguev1 "github.com/garm-ai/garm/contracts/garm/catalogue/v1"
+	cataloguev1 "github.com/garm-ai/contracts/garm/catalogue/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"

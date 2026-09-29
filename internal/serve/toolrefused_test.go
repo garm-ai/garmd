@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/contracts/ledger"
 	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/toolplane"
 	"github.com/garm-ai/garmd/internal/transport"

@@ -12,11 +12,10 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/garm-ai/garm/contracts/callctx"
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/contracts/ledger"
-	"github.com/garm-ai/garm/policy/testdata"
-	"github.com/garm-ai/garm/policy/testdata/testdatagarm"
+	"github.com/garm-ai/contracts/callctx"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/ledger"
+	"github.com/garm-ai/contracts/policy/testdata"
 	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/toolplane"
 )
@@ -123,7 +122,7 @@ func testCore(
 	t.Helper()
 	cfg := toolplane.CoreConfig{
 		HashKey:      []byte("test-key"),
-		Compartments: testdatagarm.Compartments,
+		Compartments: fixtureCompartments(),
 		Recorder:     rec,
 	}
 	for _, opt := range opts {

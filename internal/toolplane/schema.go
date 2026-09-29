@@ -5,9 +5,9 @@ import (
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 
-	"github.com/garm-ai/garm/policy"
+	"github.com/garm-ai/contracts/policy"
 )
 
 // Schema is a JSON Schema document (draft 2020-12), as MCP's inputSchema and

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/policy"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/policy"
 	"github.com/garm-ai/garmd/internal/authn"
 )
 

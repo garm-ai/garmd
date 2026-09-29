@@ -16,9 +16,9 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/contracts/grant"
-	"github.com/garm-ai/garm/policy/testdata"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/grant"
+	"github.com/garm-ai/contracts/policy/testdata"
 	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/grants"
 	"github.com/garm-ai/garmd/internal/replay"

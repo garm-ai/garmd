@@ -12,17 +12,19 @@ import (
 
 // Reading a field the binary does not have out of a catalogue that does.
 //
-// `ToolPolicy.audience` is Track G's, and the garm this repository builds
-// against has no such field. That is not a reason to wait: a catalogue
-// carries the `tool.proto` it was built with, so the ARTIFACT knows the field
-// even when the BINARY does not, and reading it from there is the same
-// inversion that lets a tool be added without a release.
+// The linked contract has `ToolPolicy.audience` today, so the field resolves
+// and the interesting path — a catalogue declaring a field this binary does
+// not have — would never be taken by the real one. A catalogue carries the
+// `tool.proto` it was built with, so the ARTIFACT knows a field even when the
+// BINARY does not, and reading it from there is the same inversion that lets
+// a tool be added without a release.
 //
-// The fixture reproduces exactly that arrangement. `testdata/tool.proto` is
-// Track G's contract, the service compiles against it, and the descriptor
-// set's options are then resolved against the LINKED garm.tool.v1 — which has
-// no `audience`, so the value survives in the annotation's unknown bytes,
-// precisely as it will in production until go.mod is bumped.
+// The fixture reproduces exactly that arrangement and keeps it reproducible.
+// `testdata/future_tool.proto` declares `audience` at field 40 rather than
+// 14, the service compiles against it, and the descriptor set's options are
+// then resolved against the LINKED garm.tool.v1 — which has nothing at 40, so
+// the value survives in the annotation's unknown bytes, precisely as the next
+// field to ship will.
 
 func audienceCatalogue(t *testing.T) *catalogue.Catalogue {
 	t.Helper()

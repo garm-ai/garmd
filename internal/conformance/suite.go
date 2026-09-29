@@ -14,8 +14,8 @@ import (
 	"slices"
 	"strings"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/contracts/grant"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/grant"
 )
 
 // Suite is one minter's conformance table.

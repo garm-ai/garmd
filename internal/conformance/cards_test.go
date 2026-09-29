@@ -17,8 +17,8 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
-	cataloguev1 "github.com/garm-ai/garm/contracts/garm/catalogue/v1"
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	cataloguev1 "github.com/garm-ai/contracts/garm/catalogue/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/tool"

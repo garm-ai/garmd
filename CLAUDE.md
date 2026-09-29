@@ -3,7 +3,13 @@
 A policy-enforcing proxy between an agent and the tools it may call. It decides,
 on every call, what passes and what the caller is allowed to see of the answer.
 
-It is a daemon. The command line tool is `garm`, in a separate repository.
+It is a daemon. The command line tool is `garm`, in a separate repository, and
+this daemon does not depend on it. The one garm-ai module in the build is
+`github.com/garm-ai/contracts` — the annotation vocabulary, the policy lattice,
+the ledger and wire shapes. It was a directory inside `garm` until v0.2.0 of
+the contract module, so anything in the corpus spelling a package
+`garm/contracts/…` or `garm/policy` means `contracts/…` and `contracts/policy`
+today.
 
 ## The three invariants
 
@@ -49,7 +55,11 @@ inside it the policy is carried by the VALUE rather than by the descriptor: a
 queue of tasks cannot say in a `.proto` which row is whose. The card
 vocabulary is not linked either — `internal/toolplane/testdata/card.proto` is
 a fixture, the type is matched by full name, and CI asserts
-`garm/contracts/garm/card` stays out of the dependency graph.
+`github.com/garm-ai/contracts/garm/card` stays out of the dependency graph.
+(It was `garm/contracts/garm/card` before the contract became its own module;
+the grep in `.github/workflows/ci.yml` follows the package, because a boundary
+check that greps a path nothing imports any more passes while asserting
+nothing.)
 
 **3. The chain is not configurable.** Ten steps, fixed order. The moment it is a
 slice someone assembles, "is authorization applied?" stops being a structural

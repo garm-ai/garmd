@@ -15,12 +15,12 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/garm-ai/garm/contracts/audit"
-	"github.com/garm-ai/garm/contracts/callctx"
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/contracts/ledger"
-	"github.com/garm-ai/garm/policy"
-	"github.com/garm-ai/garm/policy/redact"
+	"github.com/garm-ai/contracts/audit"
+	"github.com/garm-ai/contracts/callctx"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/ledger"
+	"github.com/garm-ai/contracts/policy"
+	"github.com/garm-ai/contracts/policy/redact"
 )
 
 // Core is the governance chain, with no transport in it.

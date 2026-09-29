@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garm-ai/garm/contracts/grant"
+	"github.com/garm-ai/contracts/grant"
 	"github.com/garm-ai/garmd/internal/conformance"
 	jose "github.com/go-jose/go-jose/v4"
 )
