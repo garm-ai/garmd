@@ -624,6 +624,23 @@ drives the NATS resolver directly, and the server-level tests target an HTTP
 server that `serve` replaced. What they covered still needs covering, against
 the new shapes.
 
+**The card conformance table runs in the ordinary suite**, unlike the minter
+one. `internal/conformance/cards_test.go` states the cards-and-tasks design's
+§12 garmd rows declaratively — a fact at `RESTRICTED + [financial]` seen by two
+personas over one endpoint, a `Section` with a withheld child and one with
+none left, floor 1's refusal with the path on the ledger row, a card whose own
+label the viewer misses, and a `PERSON` tool absent from an `AGENT` listing.
+It needs nothing running because both sides of the agreement are in the
+repository: the contract (a card's `access`, a tool's `audience`) as fixtures
+under `testdata`, and this daemon's reading of it. The minter suite is behind
+`-tags conformance` because it needs a live STS; a table that could run and
+did not would be a table nobody runs.
+
+Every row goes through `Core.Invoke`, not the walk directly. A projection
+asserted against the walk alone would pass with step 2 removed, and step 2 is
+half of what each of those rows is about — which is why two of them assert a
+`not_found` rather than a projection.
+
 **Producer/consumer agreement is untested** — that a real `garm-ai/tool-go`
 service and this adapter agree on the wire. The faithful version needs the
 dependency CI exists to refuse, so it belongs in a cross-repo test where both

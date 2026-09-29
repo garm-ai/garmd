@@ -1,0 +1,46 @@
+// The contract the card conformance table is stated against.
+//
+// One service, three endpoints, chosen so that every case in cards_test.go
+// differs from its neighbour in exactly one thing:
+//
+//   approval_card  INTERNAL, no compartments — an endpoint two personas both
+//                  reach, so what separates their answers is the LABEL on the
+//                  element and nothing else.
+//   tight_card     RESTRICTED + [financial] — the §10.3 endpoint, where floor
+//                  1 has something to fire against.
+//   get_balance    an AGENT tool beside a PERSON card, for the listing.
+syntax = "proto3";
+package bank.cards.v1;
+option go_package = "example.com/gen/bank_cards_v1;x";
+
+import "garm/card/v1/card.proto";
+import "garm/tool/v1/tool.proto";
+
+service CardsService {
+  rpc ApprovalCard(garm.card.v1.TaskRef) returns (garm.card.v1.Card) {
+    option (garm.tool.v1.tool) = {
+      name: "approval_card" title: "A task" verb: VERB_READ
+      min_clearance: CLEARANCE_INTERNAL sets: ["tasks"]
+      audience: [AUDIENCE_PERSON]
+      approval: { mode: MODE_NONE }
+    };
+  }
+
+  rpc TightCard(garm.card.v1.TaskRef) returns (garm.card.v1.Card) {
+    option (garm.tool.v1.tool) = {
+      name: "tight_card" title: "A payment" verb: VERB_READ
+      min_clearance: CLEARANCE_RESTRICTED compartments: ["financial"] sets: ["payments"]
+      audience: [AUDIENCE_PERSON]
+      approval: { mode: MODE_NONE }
+    };
+  }
+
+  rpc GetBalance(garm.card.v1.TaskRef) returns (garm.card.v1.TaskRef) {
+    option (garm.tool.v1.tool) = {
+      name: "get_balance" title: "Read a balance" verb: VERB_READ
+      min_clearance: CLEARANCE_INTERNAL sets: ["payments"]
+      audience: [AUDIENCE_AGENT]
+      approval: { mode: MODE_NONE }
+    };
+  }
+}
