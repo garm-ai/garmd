@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,14 +16,17 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/micro"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	"github.com/garm-ai/garm/contracts/ledger"
 	"github.com/garm-ai/garm/contracts/wire"
 	"github.com/garm-ai/garm/policy"
 	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/record"
+	"github.com/garm-ai/garmd/internal/toolplane"
 	garmnats "github.com/garm-ai/garmd/internal/transport/nats"
 )
 
@@ -161,6 +165,32 @@ func startTool(t *testing.T, url string, calls *int32Counter) {
 	// Flush so the subscription is registered before the first call: an
 	// unregistered subject answers ErrNoResponders, which this test would
 	// then report as an unreachable tool rather than a race in its own setup.
+	if err := nc.Flush(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// startRefusingTool is a tool that answers every call with a micro error —
+// the headers tool-go writes for a toolbind.CodedError — over the real wire.
+// A plain subscriber, for the same reason startTool is one.
+func startRefusingTool(t *testing.T, url, code, message string) {
+	t.Helper()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+
+	sub, err := nc.Subscribe(wire.Subject(route), func(m *nats.Msg) {
+		reply := nats.NewMsg(m.Reply)
+		reply.Header.Set(micro.ErrorCodeHeader, code)
+		reply.Header.Set(micro.ErrorHeader, message)
+		_ = nc.PublishMsg(reply)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	if err := nc.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -310,3 +340,46 @@ type int32Counter struct{ n atomic.Int64 }
 
 func (c *int32Counter) add()        { c.n.Add(1) }
 func (c *int32Counter) load() int64 { return c.n.Load() }
+
+// The same stack, with a tool that refuses. What matters over a real hop is
+// that the code the tool chose is the status the caller reads, that the
+// tool's own sentence crossed the broker and stopped at the ledger, and
+// that the row calls it a refusal rather than a failure.
+func TestAToolsCodedRefusalCrossesTheHopAsARefusal(t *testing.T) {
+	for _, code := range []string{"403", "404", "502"} {
+		t.Run(code, func(t *testing.T) {
+			url := startNATS(t)
+			startRefusingTool(t, url, code, toolMessage)
+			i := newIDP(t)
+			h, rec := e2eHandler(t, url, i)
+
+			token := i.mint(t, "CLEARANCE_INTERNAL", []string{"VERB_READ"}, time.Hour)
+			w := e2eCall(t, h, token)
+
+			want, _ := strconv.Atoi(code)
+			if w.Code != want {
+				t.Fatalf("status = %d, want %s: %s", w.Code, code, w.Body.String())
+			}
+			var b toolRefusedBody
+			if err := json.Unmarshal(w.Body.Bytes(), &b); err != nil {
+				t.Fatalf("body is not the tool_refused shape: %v (%q)", err, w.Body.String())
+			}
+			if b.Code != "tool_refused" || b.ToolCode != code || b.Message == "" {
+				t.Errorf("body = %+v, want tool_refused, tool_code %s and a sentence", b, code)
+			}
+			if strings.Contains(w.Body.String(), "intranet") {
+				t.Errorf("the tool's own message reached the wire: %s", w.Body.String())
+			}
+			events := rec.Events()
+			if len(events) != 1 {
+				t.Fatalf("%d ledger rows, want 1", len(events))
+			}
+			if ev := events[0]; ev.Outcome != ledger.OutcomeDenied ||
+				ev.ErrorKind != toolplane.ErrorKindToolRefused ||
+				!strings.Contains(ev.ErrorDetail, toolMessage) {
+				t.Errorf("row = outcome %q kind %q detail %q; want denied, tool_refused, the tool's words",
+					ev.Outcome, ev.ErrorKind, ev.ErrorDetail)
+			}
+		})
+	}
+}

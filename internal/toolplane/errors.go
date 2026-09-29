@@ -36,6 +36,75 @@ var (
 	errUnavailable = errors.New("unavailable")
 )
 
+// ToolRefusal is a tool that ran and answered with one of the codes a tool
+// may answer with (toolRefusals). It is a refusal the TOOL decided, and the
+// chain carries it to the caller as such — status = the code, a static
+// sentence for it — rather than as this daemon's own internal error, which
+// is what a model reads as "retry".
+//
+// Code is the transport's spelling ("404"). The tool's message is not here:
+// it went to the ledger's error_detail, as every other refusal's reason
+// does, and the wire gets Message() — a sentence this package wrote.
+type ToolRefusal struct {
+	Code string
+}
+
+func (e *ToolRefusal) Error() string { return "the tool refused the call with " + e.Code }
+
+// Message is the static sentence for this code, safe for any caller.
+func (e *ToolRefusal) Message() string { return toolRefusals[e.Code].message }
+
+// ErrorKindToolRefused is the ledger's error_kind for a ToolRefusal row.
+const ErrorKindToolRefused = "tool_refused"
+
+// toolRefusals is every code a tool may answer with and be understood — the
+// codes tool-go's toolbind.CodedError can carry — with the connect code the
+// chain classifies it as and the sentence the wire gets. A code not here
+// (500, a typo, a code someone invents) stays what it always was: internal,
+// with the tool's words on the ledger.
+//
+// The sentences say what KIND of answer this was and nothing the tool said.
+// A tool's message is page content by another route — a fetcher that says
+// "https://intranet/… is off the allowlist" has just disclosed the URL — so
+// it is never on the wire, whatever the tool promised.
+var toolRefusals = map[string]struct {
+	code    connect.Code
+	message string
+}{
+	"400": {connect.CodeInvalidArgument, "the tool rejected the request as malformed"},
+	"403": {connect.CodePermissionDenied, "the tool refused this request"},
+	"404": {connect.CodeNotFound, "the tool found nothing for this request"},
+	"409": {connect.CodeAborted, "the tool reports a conflict with its current state"},
+	"415": {connect.CodeInvalidArgument, "the tool does not accept the media type it was given"},
+	"422": {connect.CodeInvalidArgument, "the tool could not process the request as given"},
+	"429": {connect.CodeResourceExhausted, "the tool is limiting its rate; retry later"},
+	"502": {connect.CodeUnavailable, "the tool's upstream answered with an error"},
+	"504": {connect.CodeDeadlineExceeded, "the tool's upstream did not answer in time"},
+}
+
+// codedAnswer is what the chain asks a resolver error for: did the tool
+// answer with a code. transport.CodedError satisfies it; the chain does not
+// import transport to know that, because a resolver is a function and the
+// chain has no business knowing which hop it wraps.
+type codedAnswer interface {
+	error
+	ToolCode() string
+	ToolMessage() string
+}
+
+// toolRefusalOf reports whether err is a tool's coded answer with a code the
+// chain understands, and returns the tool's message for the ledger.
+func toolRefusalOf(err error) (code, message string, ok bool) {
+	var coded codedAnswer
+	if !errors.As(err, &coded) {
+		return "", "", false
+	}
+	if _, known := toolRefusals[coded.ToolCode()]; !known {
+		return "", "", false
+	}
+	return coded.ToolCode(), coded.ToolMessage(), true
+}
+
 // codeFor maps a chain refusal to the connect code the connect surface
 // answers with, and reports whether err was one of them.
 //
@@ -43,6 +112,13 @@ var (
 // its own code, which is what makes a resolver's NOT_FOUND survive scrubbing
 // as a NOT_FOUND.
 func codeFor(err error) (connect.Code, bool) {
+	var refused *ToolRefusal
+	if errors.As(err, &refused) {
+		if r, known := toolRefusals[refused.Code]; known {
+			return r.code, true
+		}
+		return connect.CodeInternal, true
+	}
 	switch {
 	case errors.Is(err, errNotFound):
 		return connect.CodeNotFound, true
@@ -113,6 +189,11 @@ var staticMessages = map[connect.Code]string{
 	connect.CodeUnavailable:      "unavailable",
 	connect.CodeUnauthenticated:  "unauthenticated",
 	connect.CodeUnimplemented:    "unimplemented",
+	// The codes a ToolRefusal can classify as, so a surface that scrubs one
+	// without reading the refusal still has a sentence for it.
+	connect.CodeAborted:           "aborted",
+	connect.CodeResourceExhausted: "resource exhausted",
+	connect.CodeDeadlineExceeded:  "deadline exceeded",
 }
 
 // ScrubError replaces an error's message with a static one, preserving the code

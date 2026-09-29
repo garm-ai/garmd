@@ -89,9 +89,15 @@ func (t *Transport) Invoke(ctx context.Context, procedure string, req, resp prot
 	}
 
 	// micro reports handler failures in headers, so a reply carrying an error
-	// header is an error however well-formed its body.
+	// header is an error however well-formed its body. It is a TYPED error:
+	// the tool answered, with a code it chose, and the chain decides what
+	// that code means to the caller — see toolplane's ToolRefusal.
 	if code := reply.Header.Get(micro.ErrorCodeHeader); code != "" {
-		return fmt.Errorf("%s returned %s: %s", procedure, code, reply.Header.Get(micro.ErrorHeader))
+		return &transport.CodedError{
+			Procedure: procedure,
+			Code:      code,
+			Message:   reply.Header.Get(micro.ErrorHeader),
+		}
 	}
 	if err := proto.Unmarshal(reply.Data, resp); err != nil {
 		// The response type came from this process's catalogue. A failure

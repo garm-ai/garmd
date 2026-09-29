@@ -137,6 +137,17 @@ the message is protovalidate's own sentence about the constraint, dropped for
 the rule id alone wherever it could carry a value, so the caller's values never
 come back to it. The ledger row carries the full detail as before.
 
+A tool that ran and answered with a code of its own — `403` off an allowlist,
+`404` nothing there, `502` an upstream that failed; any of `400 403 404 409
+415 422 429 502 504`, the codes tool-go's `toolbind.CodedError` carries — is a
+refusal the tool decided, and the caller reads it as one: the HTTP status is
+that code and the body is `{"code":"tool_refused","tool_code":"404",
+"message":"…"}` with a static sentence per code. The tool's own message goes
+to the ledger's `error_detail` and never to the wire — tools promise it is
+page-free, and garmd does not rely on the promise — and the row is `denied`
+with `error_kind: tool_refused`. Any other code, `500` included, is still
+`internal`.
+
 The body carries no policy: no clearance, no compartment names, no redaction
 plan, nothing about any other caller. Everything in it is something the caller
 can act on — including `approval_mode` and `material_fields`, which are what it

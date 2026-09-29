@@ -164,6 +164,15 @@ func TestAnErrorHeaderIsAnErrorHoweverWellFormedTheBody(t *testing.T) {
 			t.Errorf("the error omits %q, which is what the handler said: %v", want, err)
 		}
 	}
+	// Typed, so the chain can tell a tool's answer from a broken hop: the
+	// code and the message as the tool put them on the headers.
+	var coded *transport.CodedError
+	if !errors.As(err, &coded) {
+		t.Fatalf("a micro error is not a transport.CodedError: %T %v", err, err)
+	}
+	if coded.Code != "500" || coded.Message != "the account does not exist" {
+		t.Errorf("coded = %+v, want code 500 and the handler's message", coded)
+	}
 	if out.GetValue() != "" {
 		t.Error("the body of a failed reply was unmarshalled into the response")
 	}

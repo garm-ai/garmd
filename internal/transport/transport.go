@@ -33,6 +33,33 @@ import (
 // tool.
 var ErrUnreachable = errors.New("no service is serving this tool")
 
+// CodedError is a tool that RAN and answered with a code: NATS micro's
+// error headers, as tool-go's toolbind.CodedError puts them there.
+//
+// It is the tool's answer, not a transport failure, and the two are
+// different people's problems — which is why it is a type the chain can
+// recognise rather than text in an error string. The code is the transport's
+// spelling ("404"); which codes mean what to a caller is the chain's
+// decision, in toolplane, and this type carries no opinion on it.
+//
+// Message is the tool's own words. Tools promise a page-free message, and
+// nothing on this side relies on the promise: the chain keeps it for the
+// ledger and the wire gets a static sentence for the code.
+type CodedError struct {
+	Procedure string
+	Code      string
+	Message   string
+}
+
+func (e *CodedError) Error() string {
+	return e.Procedure + " returned " + e.Code + ": " + e.Message
+}
+
+// ToolCode and ToolMessage are how the chain reads a coded answer without
+// importing this package: it asks errors.As for anything that answers both.
+func (e *CodedError) ToolCode() string    { return e.Code }
+func (e *CodedError) ToolMessage() string { return e.Message }
+
 // Invoker executes one tool call.
 //
 // The caller supplies BOTH messages. It holds the catalogue, so it is the only

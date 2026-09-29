@@ -89,6 +89,18 @@ small catalogue against a bucket holding a large bad one carries both.
   variable aliases is not a question worth answering here; and a string map
   key on a path is spelled `[*]`. The ledger row is unchanged: the full
   protovalidate text in `error_detail`, nowhere else.
+- **A tool's coded refusal is mapped, not 500.** The NATS adapter returns a
+  micro error as `transport.CodedError`; the chain recognises one whose code
+  it understands (`400 403 404 409 415 422 429 502 504` — `toolplane/errors.go`
+  is the table) as a refusal the TOOL decided: the row is `denied` with
+  `error_kind: tool_refused` and the tool's own message in `error_detail`,
+  and the door answers status = the code with
+  `{"code":"tool_refused","tool_code":"<code>","message":"<static sentence>"}`.
+  The tool's words are never on the wire, whatever the tool promised about
+  them. A code outside the table — `500`, a typo — is still `internal`, on
+  the same path as before. The chain reads the code through a small
+  interface rather than importing the transport port, so a second adapter
+  answers the same way by satisfying it.
 - Reconciliation. A service advertises its descriptor hash; the catalogue
   records one per proto package; `garmd` compares them every 30s and refuses
   to route on a mismatch. Silence is not agreement, and a failed sweep leaves

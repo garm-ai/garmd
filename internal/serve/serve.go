@@ -28,6 +28,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -341,6 +342,26 @@ func writeViolations(w http.ResponseWriter, v *toolplane.ValidationRefusal) {
 	})
 }
 
+// writeToolRefused answers a call the tool itself refused.
+//
+// The status is the tool's code, parsed here rather than mapped: the chain
+// only ever builds a ToolRefusal for a code in its own table, all of which
+// are HTTP statuses, so a value that will not parse is a bug on this side
+// and answers 500 rather than a status nobody chose.
+func writeToolRefused(w http.ResponseWriter, r *toolplane.ToolRefusal) {
+	status, err := strconv.Atoi(r.Code)
+	if err != nil || status < 400 || status > 599 {
+		status = http.StatusInternalServerError
+	}
+	w.Header().Set("Content-Type", contentJSON)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"code":      "tool_refused",
+		"tool_code": r.Code,
+		"message":   r.Message(),
+	})
+}
+
 // maxRequestBytes is a guard, not a policy. Per-tool limits belong in the
 // chain, where they can differ by tool and by caller; this only stops one
 // request from exhausting the process before anything has looked at it.
@@ -401,6 +422,15 @@ func (h *Handler) writeChainErr(w http.ResponseWriter, def tool.Def, err error) 
 	var invalid *toolplane.ValidationRefusal
 	if errors.As(err, &invalid) {
 		writeViolations(w, invalid)
+		return
+	}
+
+	// The tool answered with a code. The status IS that code, so a caller
+	// that already knows HTTP reads it without a table, and the body says
+	// which tool code and a sentence this daemon wrote — never the tool's.
+	var refused *toolplane.ToolRefusal
+	if errors.As(err, &refused) {
+		writeToolRefused(w, refused)
 		return
 	}
 

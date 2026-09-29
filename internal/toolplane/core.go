@@ -629,6 +629,19 @@ func (c *Core) invoke(
 
 	resp, err = c.resolve(ctx, procedure, req, fn)
 	if err != nil {
+		// A tool that ran and ANSWERED with a code it chose — off the
+		// allowlist, nothing there, an upstream that failed — is a refusal
+		// the tool decided, and the row says so: denied, kind tool_refused,
+		// the tool's own words in the detail. It is not this daemon's
+		// failure, and answering it as one ("internal") is what made a model
+		// retry a 404 three times. Only the codes the chain understands;
+		// anything else is the failure path below.
+		if code, message, refused := toolRefusalOf(err); refused {
+			ev.Outcome = ledger.OutcomeDenied
+			ev.ErrorKind = ErrorKindToolRefused
+			ev.ErrorDetail = "tool refused " + code + ": " + message
+			return nil, &ToolRefusal{Code: code}
+		}
 		// The single most likely leak in this design: a resolver error
 		// routinely interpolates the value it was protecting (e.g. "user
 		// with email ada@corp.com not found"), and policy.Sanitize
