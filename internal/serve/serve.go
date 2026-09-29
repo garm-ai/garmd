@@ -324,6 +324,23 @@ func writeGrantRequired(w http.ResponseWriter, def tool.Def) {
 	})
 }
 
+// writeViolations answers a request that broke its own contract, naming the
+// violations the chain admitted for this caller.
+//
+// Connect's error shape with one field added, so a Connect client reads the
+// code and a model reads the list. `violations` is always an array: a request
+// whose only broken rules name fields this caller may not see gets `[]`, and
+// learns exactly as much as it did before this existed.
+func writeViolations(w http.ResponseWriter, v *toolplane.ValidationRefusal) {
+	w.Header().Set("Content-Type", contentJSON)
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code":       connect.CodeInvalidArgument.String(),
+		"message":    scrubbedMessage(connect.NewError(connect.CodeInvalidArgument, v)),
+		"violations": v.Violations,
+	})
+}
+
 // maxRequestBytes is a guard, not a policy. Per-tool limits belong in the
 // chain, where they can differ by tool and by caller; this only stops one
 // request from exhausting the process before anything has looked at it.
@@ -374,6 +391,16 @@ func (h *Handler) writeChainErr(w http.ResponseWriter, def tool.Def, err error) 
 	// habit that leaks somewhere else later.
 	if errors.Is(err, grants.ErrGrantRequired) {
 		writeGrantRequired(w, def)
+		return
+	}
+
+	// The other refusal with a next move: repair the request. The chain has
+	// already decided which violations this caller may see — the ones whose
+	// fields are in the input schema it was shown — so the surface lists
+	// what it was handed and adds nothing. The full detail is on the row.
+	var invalid *toolplane.ValidationRefusal
+	if errors.As(err, &invalid) {
+		writeViolations(w, invalid)
 		return
 	}
 

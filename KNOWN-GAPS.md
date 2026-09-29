@@ -73,6 +73,22 @@ small catalogue against a bucket holding a large bad one carries both.
   denies with — so it cannot advertise a tool the chain would refuse. A second,
   hand-written list would agree today and stop agreeing the first time either
   changed, and the symptom would be a model attempting a tool it can never call.
+- **Validation violations reach the caller, projected.** A request that
+  breaks a `buf.validate` rule answers 400 with `violations: [{field, rule,
+  message}]`. The disclosure rule (`toolplane/violations.go`): a violation is
+  listed when its field path is in the caller's own input projection —
+  `SchemaFor` at the caller's shape, the object `ListTools` sent them — and a
+  CEL rule when every field its expression selects off `this` is; the
+  message is protovalidate's constraint sentence, replaced by the rule id
+  alone when it could carry a value (a CEL message computed from the value, a
+  rule with no declared message, a standard message that contains the
+  refused string). The caller's values are never in the body — it sent them.
+  Left out on purpose, in the safe direction: a CEL rule with a
+  comprehension, one selecting off an index, or one naming an identifier
+  protovalidate does not bind is never listed, because which field its
+  variable aliases is not a question worth answering here; and a string map
+  key on a path is spelled `[*]`. The ledger row is unchanged: the full
+  protovalidate text in `error_detail`, nowhere else.
 - Reconciliation. A service advertises its descriptor hash; the catalogue
   records one per proto package; `garmd` compares them every 30s and refuses
   to route on a mismatch. Silence is not agreement, and a failed sweep leaves

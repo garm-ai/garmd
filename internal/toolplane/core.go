@@ -590,7 +590,7 @@ func (c *Core) invoke(
 	if err := c.checkInputWrites(p, req, &ev); err != nil {
 		return nil, err
 	}
-	if err := c.validateInput(req, &ev); err != nil {
+	if err := c.validateInput(p, tool, req, &ev); err != nil {
 		return nil, err
 	}
 	if err := c.fgaPre(ctx, p, tool, req, &ev); err != nil {

@@ -1,6 +1,7 @@
 package toolplane
 
 import (
+	"errors"
 	"fmt"
 
 	"buf.build/go/protovalidate"
@@ -35,12 +36,20 @@ import (
 //     never succeed costs no FGA lookup, no NATS round-trip, and no side
 //     effect from a handler that was about to write something.
 //
-// The detail goes to the ledger and the sentinel goes on the wire, the same
-// split every other refusal uses (see errors.go). Surfacing the violations
-// to callers is a separate decision with its own disclosure analysis: a
-// cross-field CEL rule can name a field the caller may not read, so "the
-// caller sent it, so they may see it" is not true in general.
-func (c *Core) validateInput(req proto.Message, ev *ledger.Event) error {
+// The full detail goes to the ledger, as every other refusal's does. What
+// goes on the wire is the sentinel AND the violations this caller may see —
+// see violations.go for the rule. The disclosure analysis that decides which
+// those are: a violation names a field, a rule and a sentence, and the only
+// one of the three that can say something this caller was not already shown
+// is the field. So a violation is listed when its field path is in the
+// caller's own input projection (SchemaFor at the caller's shape, the same
+// object ListTools sent them), a CEL rule when every field its expression
+// selects is; the sentence is protovalidate's own, which describes the
+// constraint rather than the value, and is dropped in favour of the rule id
+// alone wherever it could not be (a computed CEL message, a standard message
+// that happens to contain the refused string). The caller's own values never
+// appear: it sent them.
+func (c *Core) validateInput(p *Principal, t ToolDef, req proto.Message, ev *ledger.Event) error {
 	if c.validator == nil {
 		// Unreachable: NewCore refuses to build a Core without one, so that
 		// a validator that failed to construct is a startup failure rather
@@ -50,7 +59,13 @@ func (c *Core) validateInput(req proto.Message, ev *ledger.Event) error {
 	}
 	if err := c.validator.Validate(req); err != nil {
 		ev.ErrorDetail = "input validation refused: " + err.Error()
-		return errInvalidArgument
+		var verr *protovalidate.ValidationError
+		if !errors.As(err, &verr) {
+			// Not a violation — a rule that could not be compiled or
+			// evaluated. Nothing to list, and the same answer as before.
+			return errInvalidArgument
+		}
+		return &ValidationRefusal{Violations: c.admittedViolations(t, p, verr)}
 	}
 	return nil
 }

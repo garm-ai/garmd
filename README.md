@@ -127,6 +127,16 @@ is itself information, which is why an omitted tool is omitted rather than
 marked as denied. The input schema is likewise projected at this caller's own
 shape, so a field they may not write is not in the schema they are shown.
 
+A request that breaks its own contract is a 400 whose body lists the
+violations this caller may see, `violations: [{field, rule, message}]` beside
+the code, so a model can repair the request instead of retrying it unchanged.
+A violation is listed when its field is in the input schema this caller was
+shown — the same projection `ListTools` sent it, so a field it may not send is
+never named — and a cross-field CEL rule only when every field it reads is;
+the message is protovalidate's own sentence about the constraint, dropped for
+the rule id alone wherever it could carry a value, so the caller's values never
+come back to it. The ledger row carries the full detail as before.
+
 The body carries no policy: no clearance, no compartment names, no redaction
 plan, nothing about any other caller. Everything in it is something the caller
 can act on — including `approval_mode` and `material_fields`, which are what it
