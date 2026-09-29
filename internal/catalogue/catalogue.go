@@ -124,7 +124,7 @@ func Load(body []byte, now func() time.Time) (*Catalogue, error) {
 		return nil, fmt.Errorf("catalogue %s does not resolve: %w", digest, err)
 	}
 
-	defs := buildDefs(files)
+	defs := buildDefs(files, newAudienceReader(files))
 	// Every Def points at the same map. Shared and read-only: see
 	// tool.Def.FieldDocs.
 	for i := range defs {
@@ -205,7 +205,7 @@ func checkSchema(got uint32, digest string) error {
 // This is what the generated registry used to do at build time, done at boot
 // from descriptors instead — which is the whole reason a tool can be added
 // without releasing this binary.
-func buildDefs(files *protoregistry.Files) []tool.Def {
+func buildDefs(files *protoregistry.Files, aud audienceReader) []tool.Def {
 	var defs []tool.Def
 	files.RangeFiles(func(fd protoreflect.FileDescriptor) bool {
 		svcs := fd.Services()
@@ -218,7 +218,7 @@ func buildDefs(files *protoregistry.Files) []tool.Def {
 				if p == nil || p.GetExclude() {
 					continue
 				}
-				defs = append(defs, defFor(fd, svc, m, p))
+				defs = append(defs, defFor(fd, svc, m, p, aud))
 			}
 		}
 		return true
@@ -230,7 +230,7 @@ func buildDefs(files *protoregistry.Files) []tool.Def {
 }
 
 func defFor(fd protoreflect.FileDescriptor, svc protoreflect.ServiceDescriptor,
-	m protoreflect.MethodDescriptor, p *toolv1.ToolPolicy) tool.Def {
+	m protoreflect.MethodDescriptor, p *toolv1.ToolPolicy, aud audienceReader) tool.Def {
 
 	name := p.GetName()
 	if name == "" {
@@ -246,6 +246,7 @@ func defFor(fd protoreflect.FileDescriptor, svc protoreflect.ServiceDescriptor,
 		MinClearance: p.GetMinClearance(),
 		Compartments: p.GetCompartments(),
 		Sets:         p.GetSets(),
+		Audience:     aud.read(p),
 		Input:        m.Input(),
 		Output:       m.Output(),
 

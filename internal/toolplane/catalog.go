@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+
+	"github.com/garm-ai/garmd/internal/tool"
 )
 
 // CatalogFilter narrows a listing. Every field is optional and they are
@@ -27,6 +29,19 @@ type CatalogFilter struct {
 
 	// Set keeps only tools declaring membership of this tool set.
 	Set string
+
+	// Audience keeps only tools whose declared audience admits this one:
+	// PERSON, AGENT or RUNNER (cards-and-tasks design §2.5). Empty asks the
+	// default, AGENT, which is what makes a model's listing unchanged by the
+	// existence of this filter.
+	//
+	// It is a filter rather than a gate on purpose. An audience says what a
+	// tool is FOR, and "what is this for" is a discovery question: the
+	// question of what a caller MAY call is step 2's, answered by clearance,
+	// compartments, verb and set, and Catalog intersects the two. A tool
+	// whose audience this excludes is simply not offered; nothing here makes
+	// it refusable, because an audience is not an entitlement.
+	Audience string
 
 	// MaxApprovalMode, when set, keeps only tools whose approval mode is at
 	// most this — so a caller that cannot satisfy approvals can ask for the
@@ -102,6 +117,9 @@ func (f CatalogFilter) matches(t ToolDef) bool {
 		return false
 	}
 	if f.Set != "" && !containsString(t.Sets, f.Set) {
+		return false
+	}
+	if !tool.AudienceAdmits(t.Audience, f.Audience) {
 		return false
 	}
 	if f.MaxApprovalMode != toolv1.Approval_MODE_UNSPECIFIED &&

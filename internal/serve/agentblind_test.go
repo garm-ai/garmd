@@ -129,12 +129,29 @@ service SupportAssistant {
 // skip the descriptors the annotation is attached to and prove nothing.
 func agentCatalogue(t *testing.T) *catalogue.Catalogue {
 	t.Helper()
-
-	srcs := map[string]string{
+	return fixtureCatalogue(t, map[string]string{
 		"garm/agent/v1/agent.proto":              agentProtoSrc,
 		"bank/agents/v1/support_assistant.proto": bankAgentProtoSrc,
-	}
+	}, "garm/agent/v1/agent.proto", "bank/agents/v1/support_assistant.proto")
+}
+
+// fixtureCatalogue compiles proto SOURCE and loads it through the real
+// loader.
+//
+// Through the loader, never by hand: a catalogue.Catalogue assembled in Go
+// skips the descriptors an annotation is attached to, and both fixtures that
+// use this are about annotations — one this binary must not read
+// (garm.agent.v1) and one it must read out of the artifact because it has no
+// other copy of it (ToolPolicy.audience).
+//
+// The SOURCE resolver comes first so a fixture supplying its own
+// garm/tool/v1/tool.proto gets that one; a fixture supplying none falls
+// through to the linked registry.
+func fixtureCatalogue(t *testing.T, srcs map[string]string, paths ...string) *catalogue.Catalogue {
+	t.Helper()
+
 	res := protocompile.WithStandardImports(protocompile.CompositeResolver{
+		&protocompile.SourceResolver{Accessor: protocompile.SourceAccessorFromMap(srcs)},
 		protocompile.ResolverFunc(func(path string) (protocompile.SearchResult, error) {
 			fd, err := protoregistry.GlobalFiles.FindFileByPath(path)
 			if err != nil {
@@ -142,12 +159,10 @@ func agentCatalogue(t *testing.T) *catalogue.Catalogue {
 			}
 			return protocompile.SearchResult{Desc: fd}, nil
 		}),
-		&protocompile.SourceResolver{Accessor: protocompile.SourceAccessorFromMap(srcs)},
 	})
-	files, err := (&protocompile.Compiler{Resolver: res}).Compile(context.Background(),
-		"garm/agent/v1/agent.proto", "bank/agents/v1/support_assistant.proto")
+	files, err := (&protocompile.Compiler{Resolver: res}).Compile(context.Background(), paths...)
 	if err != nil {
-		t.Fatalf("compiling the agent fixture: %v", err)
+		t.Fatalf("compiling the fixture: %v", err)
 	}
 
 	set := &descriptorpb.FileDescriptorSet{}
@@ -170,8 +185,10 @@ func agentCatalogue(t *testing.T) *catalogue.Catalogue {
 
 	// The round trip the real producer does: protocompile leaves options as
 	// dynamic messages, and the tool annotations have to resolve against the
-	// linked extension types before the loader can read them. Extension 50101
-	// resolves against nothing here, which is exactly its production state.
+	// LINKED extension types before the loader can read them. Extension 50101
+	// resolves against nothing here, which is exactly its production state —
+	// and so does ToolPolicy.audience, whose bytes survive unread in the
+	// annotation until something goes looking for them by number.
 	raw, err := proto.Marshal(set)
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +210,7 @@ func agentCatalogue(t *testing.T) *catalogue.Catalogue {
 
 	cat, err := catalogue.Load(body, time.Now)
 	if err != nil {
-		t.Fatalf("the agent-bearing catalogue would not load: %v", err)
+		t.Fatalf("the fixture catalogue would not load: %v", err)
 	}
 	return cat
 }

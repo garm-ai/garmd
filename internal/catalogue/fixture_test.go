@@ -74,9 +74,13 @@ service S {
 func assemble(t *testing.T, srcs map[string]string, paths []string) []byte {
 	t.Helper()
 
-	// The annotations resolve from the linked registry rather than from
-	// source, so a fixture is one file and says only what it is about.
+	// SOURCE FIRST, then the linked registry. A fixture that supplies no
+	// garm/tool/v1/tool.proto falls through and is one file saying only what
+	// it is about — which is every fixture here but one. The exception is the
+	// audience fixture, which supplies a tool.proto this binary is older
+	// than, and it only works if a fixture's own file wins.
 	res := protocompile.WithStandardImports(protocompile.CompositeResolver{
+		&protocompile.SourceResolver{Accessor: protocompile.SourceAccessorFromMap(srcs)},
 		protocompile.ResolverFunc(func(path string) (protocompile.SearchResult, error) {
 			fd, err := protoregistry.GlobalFiles.FindFileByPath(path)
 			if err != nil {
@@ -84,7 +88,6 @@ func assemble(t *testing.T, srcs map[string]string, paths []string) []byte {
 			}
 			return protocompile.SearchResult{Desc: fd}, nil
 		}),
-		&protocompile.SourceResolver{Accessor: protocompile.SourceAccessorFromMap(srcs)},
 	})
 	files, err := (&protocompile.Compiler{Resolver: res}).Compile(context.Background(), paths...)
 	if err != nil {

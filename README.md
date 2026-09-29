@@ -99,7 +99,7 @@ descriptors and answered through the chain.
 
 Beside it is one endpoint that is not a tool. `POST
 /garm.v1.ToolCatalogService/ListTools`, with a bearer token and a `{}` body,
-answers what this caller may call:
+answers what this caller may be offered:
 
 ```json
 {
@@ -111,6 +111,8 @@ answers what this caller may call:
       "title": "Read a balance",
       "description": "…",
       "verb": "VERB_READ",
+      "sets": ["payments"],
+      "audience": ["AGENT"],
       "approval_mode": "MODE_UNSPECIFIED",
       "material_fields": [],
       "guidance": {"when_to_use": "…", "when_not_to_use": "…", "on_error": "…"},
@@ -129,6 +131,26 @@ and a caller cleared for none gets `"tools": []` rather than an error. Existence
 is itself information, which is why an omitted tool is omitted rather than
 marked as denied. The input schema is likewise projected at this caller's own
 shape, so a field they may not write is not in the schema they are shown.
+
+**The body may name an audience.** `{"audience": "PERSON"}`, or `AGENT` or
+`RUNNER`; absent means `AGENT`, which is why a model's listing is unchanged by
+this field existing. A set says who *holds* a tool; an audience says what it is
+*for*, and that is a different question with a different answer over the same
+entitlements. `get_balance` is a tool plenty of people's claims reach and
+nobody should ever be shown a form for; a card is person-facing whatever its
+parent tool is. So a tool declares its audience in its own contract, and a row
+is listed when that audience admits the asked-for one **and** the caller's
+claims reach it. Neither half is new and neither substitutes for the other:
+asking for `PERSON` widens nothing, because the second half is still step 2's
+predicate. An audience that is not one of the three is a 400 rather than a
+quiet fall back to the model's list.
+
+A row carries its `sets` and its `audience` for the same reason it carries
+`approval_mode`: a client that has to group a listing otherwise keeps its own
+copy of the catalogue's vocabulary. `audience` is what the author *declared*,
+`[]` when they declared nothing — the same distinction `approval_mode` keeps
+between `MODE_UNSPECIFIED` and `MODE_NONE`. An empty audience reads as `AGENT`
+wherever it is applied.
 
 A request that breaks its own contract is a 400 whose body lists the
 violations this caller may see, `violations: [{field, rule, message}]` beside

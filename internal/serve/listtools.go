@@ -2,8 +2,10 @@ package serve
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 
+	"github.com/garm-ai/garmd/internal/tool"
 	"github.com/garm-ai/garmd/internal/toolplane"
 )
 
@@ -30,12 +32,43 @@ type listToolsResponse struct {
 	Tools           []listToolItem `json:"tools"`
 }
 
+// listToolsRequest is the body. Every field is optional and `{}` is the
+// ordinary case; an empty body is `{}`.
+type listToolsRequest struct {
+	// Audience is what the caller is asking ON BEHALF OF: PERSON, AGENT or
+	// RUNNER (cards-and-tasks design §2.5). Absent means AGENT, which is why
+	// a model's listing is unchanged by this field existing — the caller that
+	// never asks gets exactly what it got before.
+	//
+	// It is not a claim and it is not narrowing: a caller may ask for any
+	// audience, and asking for PERSON gets them the person-facing tools THEIR
+	// OWN claims already reach and not one more. What it selects is which
+	// question is being asked — "what may I call" and "what may I put in
+	// front of somebody" have different answers over the same entitlements.
+	Audience string `json:"audience"`
+}
+
 type listToolItem struct {
 	FQN         string `json:"fqn"`
 	Method      string `json:"method"`
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Verb        string `json:"verb"`
+
+	// Sets is the tool sets this tool declares membership of — who HOLDS it —
+	// and Audience is what it is FOR. Both are published because a client
+	// that has to group a listing (Studio listing agents apart from tools)
+	// otherwise keeps its own copy of the catalogue's vocabulary, which is
+	// the hard-coded list this field exists to delete.
+	//
+	// Audience is what the author DECLARED, empty when they declared nothing
+	// — the same distinction approval_mode keeps between MODE_UNSPECIFIED and
+	// MODE_NONE. An empty audience reads as AGENT wherever it is applied, and
+	// a consumer that needs the effective value applies that rule; a row that
+	// asserted AGENT would be this endpoint putting words in an author's
+	// mouth.
+	Sets     []string `json:"sets"`
+	Audience []string `json:"audience"`
 
 	// ApprovalMode and MaterialFields are what a caller needs to ask for an
 	// approval before it calls. Without them it must copy the annotation by
@@ -62,8 +95,16 @@ type listToolGuidance struct {
 // Everything it reads comes from the plane the request pinned, never from a
 // second Store.Current(): a listing assembled from two generations would name
 // one digest and carry another's tools, and both halves would look valid.
-func (h *Handler) listTools(w http.ResponseWriter, pl *plane, p *toolplane.Principal) {
-	defs := pl.core.Catalog(p, toolplane.CatalogFilter{})
+func (h *Handler) listTools(
+	w http.ResponseWriter, r *http.Request, pl *plane, p *toolplane.Principal,
+) {
+	want, err := audienceAsked(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_argument", err.Error())
+		return
+	}
+
+	defs := pl.core.Catalog(p, toolplane.CatalogFilter{Audience: want})
 
 	// Non-nil, so `tools` marshals as [] and never as null. A caller cleared
 	// for nothing gets an empty list, which is an answer; null is a shape the
@@ -100,6 +141,8 @@ func (h *Handler) listTools(w http.ResponseWriter, pl *plane, p *toolplane.Princ
 			// other surface in this system spells. Numbers here would make a
 			// consumer keep its own copy of the enum.
 			Verb:           d.Verb.String(),
+			Sets:           orEmpty(d.Sets),
+			Audience:       orEmpty(d.Audience),
 			ApprovalMode:   d.ApprovalMode.String(),
 			MaterialFields: orEmpty(d.MaterialFields),
 			Guidance: listToolGuidance{
@@ -137,6 +180,47 @@ func withDraft(s toolplane.Schema) toolplane.Schema {
 	out["$schema"] = jsonSchemaDraft
 	return out
 }
+
+// audienceAsked reads the audience from the request body.
+//
+// A missing body, an empty one and `{}` are all "the default", because this
+// endpoint has been callable with all three since before it took a body at
+// all and a listing that started 400-ing on one of them would break a caller
+// that was never wrong. A body that is not JSON, or names an audience that is
+// not one, is a 400: a client asking for "PERSONS" means to ask for something
+// and must not be quietly handed the model's list instead.
+func audienceAsked(r *http.Request) (string, error) {
+	if r == nil || r.Body == nil {
+		return "", nil
+	}
+	// Bounded like every other body this surface reads. A listing request is
+	// a few dozen bytes; anything larger is not one.
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<10))
+	if err != nil || len(body) == 0 {
+		return "", nil //nolint:nilerr // an unreadable listing body asks the default
+	}
+	var req listToolsRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return "", errBadListBody
+	}
+	name, ok := tool.NormaliseAudience(req.Audience)
+	if !ok {
+		return "", errBadAudience
+	}
+	return name, nil
+}
+
+// The two refusals, as values so the text is written once and says nothing
+// about the catalogue: a malformed listing request must not be a way to
+// learn what is in one.
+var (
+	errBadListBody = listErr("the request body is not a JSON object")
+	errBadAudience = listErr("audience must be one of PERSON, AGENT, RUNNER")
+)
+
+type listErr string
+
+func (e listErr) Error() string { return string(e) }
 
 // orEmpty keeps a JSON array an array. A consumer handed null for a field
 // documented as a list has to special-case it, and the one that forgets

@@ -85,6 +85,8 @@ type listedTool struct {
 	Title          string   `json:"title"`
 	Description    string   `json:"description"`
 	Verb           string   `json:"verb"`
+	Sets           []string `json:"sets"`
+	Audience       []string `json:"audience"`
 	ApprovalMode   string   `json:"approval_mode"`
 	MaterialFields []string `json:"material_fields"`
 	Guidance       struct {
@@ -97,7 +99,14 @@ type listedTool struct {
 
 func listTools(t *testing.T, h *Handler) (*httptest.ResponseRecorder, listing) {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodPost, ListToolsPath, strings.NewReader("{}"))
+	return listToolsFor(t, h, "{}")
+}
+
+// listToolsFor is the same call with a body the caller chooses, for the
+// audience cases.
+func listToolsFor(t *testing.T, h *Handler, body string) (*httptest.ResponseRecorder, listing) {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, ListToolsPath, strings.NewReader(body))
 	r.Header.Set("Content-Type", contentJSON)
 	w := call(t, h, r)
 	var got listing

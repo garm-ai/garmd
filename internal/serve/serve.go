@@ -203,7 +203,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// is the catalogue itself, projected. Reaching it means having said who you
 	// are, exactly as reaching a tool does.
 	if r.URL.Path == ListToolsPath {
-		h.listTools(w, pl, principal)
+		h.listTools(w, r, pl, principal)
 		return
 	}
 

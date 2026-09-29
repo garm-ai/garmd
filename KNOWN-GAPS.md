@@ -73,6 +73,42 @@ small catalogue against a bucket holding a large bad one carries both.
   denies with — so it cannot advertise a tool the chain would refuse. A second,
   hand-written list would agree today and stop agreeing the first time either
   changed, and the symptom would be a model attempting a tool it can never call.
+- **`ListTools` takes an audience.** The body may name `PERSON`, `AGENT` or
+  `RUNNER`; absent means `AGENT`, so a model's listing is unchanged by the
+  field existing and a catalogue that declares no audience anywhere lists
+  exactly as it did. A tool is offered when its declared audience admits the
+  asked-for one **and** the caller's claims reach it — the second half is step
+  2's predicate, untouched, so asking for an audience widens nothing. A row
+  gained `sets` and `audience`; `audience` is what the author declared and `[]`
+  when they declared nothing.
+
+  **An audience is a LISTING rule and not a fourth gate.** Nothing in the ten
+  steps reads it: a caller that knows a method name can still CALL a `PERSON`
+  tool their claims reach, and gets whatever the chain gives them. That is the
+  design's own division (§2.5: "step 2's visibility, unchanged") and it is
+  sound for cards specifically, because a card's contents are projected by the
+  card walk at the viewer's own reach whoever fetched it. Closing it would
+  mean an audience that can deny a call, which is a fifth vocabulary to check
+  when one is refused. Revisit only if something other than a card ever needs
+  an audience to be an entitlement.
+
+  ***The audience is read out of the catalogue, not out of the binary.***
+  `ToolPolicy.audience` is Track G's and the garm this repository builds
+  against (v0.14.2) has no such field. `internal/catalogue/audience.go` finds
+  the field's NUMBER by NAME in the catalogue's own `garm.tool.v1.ToolPolicy`
+  descriptor — so Track G's number choice cannot break the read — and then
+  reads the VALUE either off the linked type (once a garm bump gives it one)
+  or out of the unknown bytes the annotation carried through the load. A plain
+  field and an extension of `ToolPolicy` are the same read. A catalogue whose
+  `tool.proto` has no `audience` at all yields nothing, which reads as `AGENT`:
+  the pre-audience behaviour, exactly.
+
+  `internal/catalogue/testdata/tool.proto` and `internal/serve/testdata/tool.proto`
+  are Track G's contract, copied, so the fixtures compile a tool declaring an
+  audience against a `tool.proto` this binary is older than — which is the
+  production arrangement. **When garm v0.17.0 lands and go.mod is bumped,
+  delete both copies** and let the fixtures compile against the linked
+  contract again.
 - **Validation violations reach the caller, projected.** A request that
   breaks a `buf.validate` rule answers 400 with `violations: [{field, rule,
   message}]`. The disclosure rule (`toolplane/violations.go`): a violation is
