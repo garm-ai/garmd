@@ -272,14 +272,13 @@ jobs:
   conformance:
     name: identity conformance (sts)
     runs-on: ubuntu-latest
-    # Skipped on PRs from forks, and skipped deliberately. The `sts`
-    # checkout below needs a secret; a fork PR is handed none, so the job
-    # would run, substitute `github.token`, and fail the private checkout
-    # with a permissions error that reads like a bug in the contributor's
-    # change. A skipped job is honest about what was not checked. A
-    # permanently red one on every outside PR teaches people to ignore red
-    # CI, which costs more than this job is worth.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Runs everywhere, forks included. It used to be guarded, because the
+    # `sts` checkout below needed a secret and a fork PR is handed none —
+    # the job would substitute `github.token`, fail the private checkout, and
+    # report a permissions error that read like a bug in the contributor's
+    # change. garm-ai/sts is PUBLIC now, so there is no secret to be without
+    # and nothing left to guard against. The drift check this job performs is
+    # most valuable on exactly the PRs the guard used to skip.
     steps:
       - uses: actions/checkout@v5
         with:
@@ -298,8 +297,19 @@ jobs:
       # garm-ai/sts in `go list -deps -test` under both tag sets, so the
       # only edge between these two repositories is a TCP connection.
       #
-      # sts is private, hence the token and hence the fork guard above. The
-      # steps below read $GITHUB_WORKSPACE/sts/deploy/{claims,tuples}.yaml
+      # NO `token:`, because garm-ai/sts is public — the same reason the
+      # devkit checkout above has none. It carried
+      # `secrets.GARM_CI_TOKEN || github.token` from when sts was private,
+      # and that is what broke this job: the secret resolved to no usable
+      # credential, actions/checkout wrote an empty Authorization header
+      # rather than none, and git answered
+      #
+      #     fatal: could not read Username for 'https://github.com'
+      #
+      # on a repository anyone can clone anonymously. An empty credential is
+      # not the absence of one.
+      #
+      # The steps below read $GITHUB_WORKSPACE/sts/deploy/{claims,tuples}.yaml
       # and build ./cmd/sts from this checkout: the conformance suite is
       # pinned against the deployment fixtures sts actually ships, not
       # against a copy of them kept here.
@@ -317,7 +327,6 @@ jobs:
           repository: garm-ai/sts
           ref: v0.3.0
           path: sts
-          token: ${{ secrets.GARM_CI_TOKEN || github.token }}
 
       # The suite for this job lives in this repository at
       # internal/conformance/suites/sts.json, alongside devkit's. Both moved
