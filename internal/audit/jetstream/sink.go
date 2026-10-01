@@ -23,9 +23,9 @@ import (
 	natsjs "github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/garm-ai/garm/contracts/audit"
-	"github.com/garm-ai/garm/contracts/ledger"
-	"github.com/garm-ai/garm/contracts/wire"
+	"github.com/garm-ai/contracts/audit"
+	"github.com/garm-ai/contracts/ledger"
+	"github.com/garm-ai/contracts/wire"
 )
 
 // Publisher is the one JetStream method a Sink uses.

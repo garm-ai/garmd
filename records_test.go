@@ -1,4 +1,4 @@
-package main
+package garmd
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 // pins.
 func TestWithNoAuditConfigurationTheSinkIsNil(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	recorder, sink, closeRecord, err := records(context.Background(), nil, log, serveOpts{})
+	recorder, sink, closeRecord, err := records(context.Background(), nil, log, Config{})
 	if err != nil {
 		t.Fatalf("records: %v", err)
 	}

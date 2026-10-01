@@ -44,9 +44,9 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
-	ledgerv1 "github.com/garm-ai/garm/contracts/garm/ledger/v1"
-	"github.com/garm-ai/garm/contracts/ledger"
-	"github.com/garm-ai/garm/contracts/wire"
+	ledgerv1 "github.com/garm-ai/contracts/garm/ledger/v1"
+	"github.com/garm-ai/contracts/ledger"
+	"github.com/garm-ai/contracts/wire"
 )
 
 // Publisher is the one JetStream method a Recorder uses.

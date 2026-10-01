@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/garm-ai/garm/contracts/wire"
+	"github.com/garm-ai/contracts/wire"
 	"github.com/garm-ai/garmd/internal/transport"
 )
 
@@ -78,7 +78,7 @@ func (r *Reconciler) sweep(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	services, err := r.Discoverer.Services(ctx)
+	round, err := r.Discoverer.Services(ctx)
 	if err != nil {
 		// A failed sweep leaves the previous verdict standing rather than
 		// clearing it. Discovery being unavailable is not evidence that a
@@ -102,7 +102,14 @@ func (r *Reconciler) sweep(ctx context.Context) {
 
 	bad := map[string]string{}
 	seen := map[string]bool{}
-	for _, svc := range services {
+	// Which micro service carried each proto package this round, so a
+	// package's verdict can be held against the completeness of the round
+	// that would have cleared it. A package nothing answered for has no
+	// entry, and Round.Complete("") is false unless the enumeration was
+	// complete — which is the right answer: if the whole plane was heard and
+	// nothing served the package, silence is a verdict.
+	pkgService := map[string]string{}
+	for _, svc := range round.Services {
 		for _, subject := range svc.Subjects {
 			pkg, known := pkgOf[subject]
 			if !known {
@@ -112,6 +119,7 @@ func (r *Reconciler) sweep(ctx context.Context) {
 				continue
 			}
 			seen[pkg] = true
+			pkgService[pkg] = svc.Name
 
 			want := cat.DescriptorHashes[pkg]
 			switch {
@@ -131,10 +139,60 @@ func (r *Reconciler) sweep(ctx context.Context) {
 		}
 	}
 
+	// A verdict is CLEARED by silence, and silence is only evidence when the
+	// round heard the whole plane.
+	//
+	// This is the half of reconciliation an incomplete round is dangerous
+	// for. Quarantining is driven by a positive observation — an instance
+	// advertising a hash that does not match — and a reply that never
+	// arrived cannot produce one of those. Lifting a quarantine is driven by
+	// the absence of that observation, and a reply that never arrived looks
+	// exactly like a service that stopped misbehaving. So a round that could
+	// not hear everything may ADD a verdict and may not remove one; the
+	// instance whose reply went missing may be precisely the one still
+	// running the wrong contract.
+	//
+	// Fail-closed in the direction that costs an operator a stale
+	// quarantine, which is visible in the log and fixed by the next complete
+	// round, rather than one that silently starts routing to a service
+	// nobody has checked.
 	r.mu.Lock()
 	prev := r.quarantined
+	for pkg, why := range prev {
+		if _, replaced := bad[pkg]; replaced {
+			// This round saw the package again and reached its own verdict,
+			// which supersedes whatever stood before.
+			continue
+		}
+		// Round.Complete reports false for every name once the enumeration
+		// itself was short, so a plane that could not be enumerated clears
+		// nothing at all, and a plane that could clears only the packages
+		// whose service was heard in full. A package nothing answered for
+		// this round has no service name, and an empty name is complete
+		// exactly when the enumeration was: if the whole plane was heard and
+		// nothing served the package, silence IS the verdict.
+		if !round.Complete(pkgService[pkg]) {
+			bad[pkg] = why
+		}
+	}
+	if !round.ConcludesAbsence() {
+		for pkg := range r.seen {
+			seen[pkg] = true
+		}
+	}
 	r.quarantined, r.seen, r.last = bad, seen, time.Now()
 	r.mu.Unlock()
+
+	if r.Log != nil {
+		if round.Enumeration != nil {
+			r.Log.Warn("discovery could not hear the whole plane; "+
+				"no verdict was cleared this sweep", "err", round.Enumeration)
+		}
+		for name, why := range round.Partial {
+			r.Log.Warn("a service was heard only in part; "+
+				"its verdict was not cleared this sweep", "service", name, "err", why)
+		}
+	}
 
 	if r.Log != nil {
 		for pkg, why := range bad {

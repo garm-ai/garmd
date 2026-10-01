@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,9 +17,10 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/contracts/grant"
-	"github.com/garm-ai/garm/policy/testdata"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/grant"
+	contractgrants "github.com/garm-ai/contracts/grants"
+	"github.com/garm-ai/contracts/policy/testdata"
 	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/grants"
 	"github.com/garm-ai/garmd/internal/replay"
@@ -388,5 +390,220 @@ func TestAToolWithoutAGrantModeIsNotChecked(t *testing.T) {
 	td.ApprovalMode = toolv1.Approval_MODE_NONE
 	if err := f.v.Verify(context.Background(), caller(), td, theRequest()); err != nil {
 		t.Errorf("a tool declaring no approval was checked for one: %v", err)
+	}
+}
+
+// A grant carrying a `task` claim verifies (cards-and-tasks design §7).
+//
+// The STS binds a grant to the task it was given on, so two tasks with the
+// same material — the same payment asked twice — cannot share one. garmd's
+// verifier does NOT read the claim to decide with: the thing that knows which
+// task is being decided is the tasks tool, comparing the claim against the row
+// it stored, and a check here would have nothing to compare against but
+// itself.
+//
+// What this pins is the half that CAN go wrong from here: a claim garmd does
+// not read must not fail a grant. A verifier that refused what it did not
+// recognise would make every claim the STS adds a breaking change, and the
+// symptom would be every approval in the estate failing at once on the day
+// the STS shipped.
+func TestAGrantCarryingATaskClaimVerifies(t *testing.T) {
+	f := newFixture(t)
+	// `task` is the contract's name. `task_id` is here as a claim this
+	// verifier does not recognise AT ALL — it used to be read as a second
+	// spelling, and is not any more — so the row proves the same point as an
+	// invented claim would: what garmd does not read cannot fail a grant.
+	for name, claim := range map[string]string{"task": "task", "an unread claim": "task_id"} {
+		t.Run(name, func(t *testing.T) {
+			token := f.claims(func(_, g map[string]any) { g[claim] = "tsk_01HZY" })
+			if err := f.verify(t, token); err != nil {
+				t.Fatalf("a grant bound to a task was refused: %v", err)
+			}
+		})
+	}
+}
+
+// And the binding reaches whoever asked for it, refused or not.
+//
+// Before the checks, deliberately: "an approval naming task X was presented
+// and rejected" and "no approval naming a task was ever presented" are
+// different facts, and only the first is worth waking up for.
+func TestTheTaskBindingIsReportedWhetherTheGrantIsGoodOrNot(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mut      func(body, g map[string]any)
+		wantPass bool
+	}{
+		"a good grant": {func(_, g map[string]any) { g["task"] = "tsk_ok" }, true},
+		"a grant for another tool": {func(_, g map[string]any) {
+			g["task"] = "tsk_ok"
+			g["tool"] = "t.v1.something_else"
+		}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			var got toolplane.GrantBinding
+			ctx := toolplane.WithGrantBindingForTest(context.Background(), &got)
+			ctx = grants.WithGrant(ctx, f.claims(tc.mut))
+
+			err := f.v.Verify(ctx, caller(), payTool(), theRequest())
+			if tc.wantPass != (err == nil) {
+				t.Fatalf("Verify err = %v, wantPass = %v", err, tc.wantPass)
+			}
+			if got.TaskID != "tsk_ok" {
+				t.Errorf("the binding reported %q, want tsk_ok", got.TaskID)
+			}
+		})
+	}
+}
+
+// A grant with no task claim reports no binding, so the ledger tag is absent
+// rather than empty. A column that is always filled distinguishes nothing.
+func TestAGrantWithNoTaskReportsNoBinding(t *testing.T) {
+	f := newFixture(t)
+	var got toolplane.GrantBinding
+	ctx := toolplane.WithGrantBindingForTest(context.Background(), &got)
+	ctx = grants.WithGrant(ctx, f.claims(nil))
+
+	if err := f.v.Verify(ctx, caller(), payTool(), theRequest()); err != nil {
+		t.Fatalf("a valid grant was refused: %v", err)
+	}
+	if got.TaskID != "" {
+		t.Errorf("a grant naming no task reported %q", got.TaskID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// What consolidating the reader onto contracts/grants must not have changed.
+// ---------------------------------------------------------------------------
+
+// The digest over the values a human approved is pinned to a literal.
+//
+// This is the one value in the platform that must never change by accident.
+// It is computed on one side by an STS showing a person some values, and on
+// this side by re-extracting them from the request about to be sent — so a
+// change to the canonical text of a scalar, or to grant.Digest's encoding,
+// invalidates every approval outstanding in the plane at the moment it ships.
+// Nothing about that failure is loud: the grants simply stop matching.
+//
+// The literal below is the digest of the request the rest of this file uses,
+// read through the material fields the tool declares. If this test fails, the
+// change under it is a breaking change to a credential, not a refactor.
+func TestTheMaterialDigestIsPinnedToALiteral(t *testing.T) {
+	const want = "sha256:6a6dfa720e0b2334e26035636ede4cc1b5c62232594d2aaac68ff8d61265680d"
+
+	values, err := contractgrants.Materialise(theRequest().ProtoReflect(), payTool().MaterialFields)
+	if err != nil {
+		t.Fatalf("Materialise: %v", err)
+	}
+	if got := grant.Digest(values); got != want {
+		t.Errorf("the material digest is %s, want %s\n"+
+			"values = %v\n"+
+			"If this is deliberate, every approval outstanding when it ships stops "+
+			"matching, so it is a break in a credential rather than a refactor.",
+			got, want, values)
+	}
+}
+
+// garmd checks the claims it checked before, and still ignores the task.
+//
+// The task claim binds an approval to the decision it was given on, and the
+// service that knows which task is being decided is the one that opened it —
+// contracts/grants has CheckTask for exactly that, and this verifier must
+// never call it. A check here would have nothing to compare against but
+// itself, and would turn a claim garmd only RECORDS into one that can refuse
+// a call.
+//
+// The table is the whole set: bend one claim at a time and assert whether the
+// verdict moves. A consolidation that quietly widened or narrowed which
+// claims are read fails here rather than in production.
+func TestTheClaimsGarmdChecksAreUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mut     func(body, g map[string]any)
+		refused bool
+	}{
+		// Read and checked.
+		{"iss", func(b, _ map[string]any) { b["iss"] = "https://evil" }, true},
+		{"aud", func(b, _ map[string]any) { b["aud"] = "garm://elsewhere" }, true},
+		{"jti", func(b, _ map[string]any) { delete(b, "jti") }, true},
+		{"iat", func(b, _ map[string]any) { b["iat"] = now.Add(-2 * time.Hour).Unix() }, true},
+		{"exp", func(b, _ map[string]any) { b["exp"] = now.Add(-time.Hour).Unix() }, true},
+		{"act", func(b, _ map[string]any) {
+			b["act"] = map[string]any{"sub": "agent:x"}
+		}, true},
+		{"tool", func(_, g map[string]any) { g["tool"] = "t.v1.other" }, true},
+		{"subject", func(_, g map[string]any) { g["subject"] = "customer:C-2" }, true},
+		{"material", func(_, g map[string]any) { g["material"] = "sha256:0000" }, true},
+		{"approver_clearance", func(_, g map[string]any) {
+			g["approver_clearance"] = "INTERNAL"
+		}, true},
+
+		// Read and NOT checked. The task reaches the ledger row as
+		// attribution and decides nothing.
+		{"task, naming another task", func(_, g map[string]any) {
+			g["task"] = "tsk_somebody_elses"
+		}, false},
+		{"task, absent", func(_, g map[string]any) { delete(g, "task") }, false},
+
+		// Not read at all. `task_id` was accepted as a second spelling of
+		// `task` because both had appeared in the design record; no minter
+		// produces it, the contract declares one name, and a reader tolerant
+		// of two is how two readers of one credential drift apart without
+		// anything noticing. Setting it must now do nothing whatsoever —
+		// including not populating the binding, which the next test pins.
+		{"task_id", func(_, g map[string]any) { g["task_id"] = "tsk_ignored" }, false},
+
+		// Claims the approver's own token carries that a grant does not
+		// speak for. Present in the body and read by nothing here.
+		{"approver", func(_, g map[string]any) { g["approver"] = "employee:someone" }, false},
+		{"an unknown claim", func(_, g map[string]any) { g["invented"] = "x" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			err := f.verify(t, f.claims(tc.mut))
+			switch {
+			case tc.refused && err == nil:
+				t.Errorf("bending %q was accepted; garmd used to check that claim", tc.name)
+			case !tc.refused && err != nil:
+				t.Errorf("bending %q was refused (%v); garmd did not use to check "+
+					"that claim, and a consolidation must not have started", tc.name, err)
+			}
+		})
+	}
+}
+
+// `task_id` is not a second spelling of `task`, anywhere.
+//
+// The tolerant reader is gone, and the proof that it is gone is that a grant
+// carrying only `task_id` reports NO binding — not merely that it verifies.
+// A reader that still accepted the alias would pass the table above, because
+// the task decides nothing; it would show up here.
+func TestTaskIdIsNotReadAsTheTaskClaim(t *testing.T) {
+	f := newFixture(t)
+	var got toolplane.GrantBinding
+	ctx := toolplane.WithGrantBindingForTest(context.Background(), &got)
+	ctx = grants.WithGrant(ctx, f.claims(func(_, g map[string]any) {
+		delete(g, "task")
+		g["task_id"] = "tsk_ignored"
+	}))
+	if err := f.v.Verify(ctx, caller(), payTool(), theRequest()); err != nil {
+		t.Fatalf("the grant was refused: %v", err)
+	}
+	if got.TaskID != "" {
+		t.Errorf("the binding reported %q; task_id was read as the task claim", got.TaskID)
+	}
+}
+
+// One signature-algorithm allowlist, not two.
+//
+// garmd's token verifier exports the list and the grant verifier shares it,
+// for the reason its own comment gives. The contract module publishes the
+// same list for the processes that cannot import garmd. Two lists is two
+// things to widen and the second is the one nobody remembers to look at, so
+// this fails the day they stop agreeing.
+func TestTheAlgorithmAllowlistsAgree(t *testing.T) {
+	if !reflect.DeepEqual(authn.PermittedAlgorithms, contractgrants.PermittedAlgorithms) {
+		t.Errorf("the allowlists have drifted:\n  garmd:     %v\n  contracts: %v",
+			authn.PermittedAlgorithms, contractgrants.PermittedAlgorithms)
 	}
 }

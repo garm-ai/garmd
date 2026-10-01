@@ -1,7 +1,9 @@
 package toolplane_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strings"
@@ -10,10 +12,10 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/contracts/ledger"
-	"github.com/garm-ai/garm/policy/testdata"
-	"github.com/garm-ai/garm/policy/testdata/testdatagarm"
+	"github.com/garm-ai/contracts/callctx"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/ledger"
+	"github.com/garm-ai/contracts/policy/testdata"
 	"github.com/garm-ai/garmd/internal/record"
 	"github.com/garm-ai/garmd/internal/toolplane"
 )
@@ -120,7 +122,7 @@ func testCore(
 	t.Helper()
 	cfg := toolplane.CoreConfig{
 		HashKey:      []byte("test-key"),
-		Compartments: testdatagarm.Compartments,
+		Compartments: fixtureCompartments(),
 		Recorder:     rec,
 	}
 	for _, opt := range opts {
@@ -509,5 +511,183 @@ func TestTheLedgerRecordsThePrincipalKind(t *testing.T) {
 	if got := events[0].PrincipalKind; got != "PRINCIPAL_KIND_AGENT" {
 		t.Errorf("PrincipalKind = %q, want PRINCIPAL_KIND_AGENT — the question this "+
 			"field exists to answer is which rows were agents", got)
+	}
+}
+
+// The id on the hop is the id in the ledger. A tool's own record of a call and
+// the row that authorised it are joined on this and nothing else.
+func TestTheHopCarriesTheLedgerEventIdAndTheDelegationChain(t *testing.T) {
+	var seen *toolv1.InvocationContext
+	rec := &record.Memory{}
+	core := testCore(t, rec, func(ctx context.Context, _ proto.Message) (proto.Message, error) {
+		seen = callctx.FromContext(ctx)
+		return testRequest(), nil
+	})
+
+	p := testPrincipal(toolv1.Clearance_CLEARANCE_INTERNAL)
+	p.Chain = []string{"employee:jdoe", "agent:support-assistant"}
+	p.Actor = "agent:support-assistant"
+	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+
+	if seen == nil {
+		t.Fatal("the resolver saw no invocation context at all")
+	}
+	events := rec.Events()
+	if len(events) != 1 {
+		t.Fatalf("%d ledger rows, want 1", len(events))
+	}
+	if seen.GetCallId() != events[0].ID {
+		t.Errorf("call_id = %q and the ledger row is %q; a tool's record of this "+
+			"call names a row that does not exist", seen.GetCallId(), events[0].ID)
+	}
+	if len(seen.GetAct()) != 1 || seen.GetAct()[0].GetSubject() != "agent:support-assistant" {
+		t.Errorf("act = %v; the delegated hop reached the resolver looking direct",
+			seen.GetAct())
+	}
+}
+
+// An undelegated call asserts no delegation. A one-element chain is the
+// subject on their own, so act must be empty rather than repeating them: a
+// runner reading an act chain that names the subject would exchange for a
+// delegation nobody performed.
+func TestADirectCallCarriesNoActChain(t *testing.T) {
+	var seen *toolv1.InvocationContext
+	core := testCore(t, &record.Memory{},
+		func(ctx context.Context, _ proto.Message) (proto.Message, error) {
+			seen = callctx.FromContext(ctx)
+			return testRequest(), nil
+		})
+
+	p := testPrincipal(toolv1.Clearance_CLEARANCE_INTERNAL)
+	p.Chain = []string{p.Subject}
+	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if len(seen.GetAct()) != 0 {
+		t.Errorf("act = %v on a direct call; a delegation nobody performed is asserted "+
+			"to everything on the far side of the hop", seen.GetAct())
+	}
+}
+
+// Assertions, never credentials — and never the policy inputs either. The
+// whole encoded context is compared against the exact message it is allowed to
+// be, so a field added later (the token id, the clearance, the compartments)
+// fails here rather than reaching a tool.
+func TestTheContextOnTheHopCarriesNothingBesideItsAssertions(t *testing.T) {
+	var seen *toolv1.InvocationContext
+	core := testCore(t, &record.Memory{},
+		func(ctx context.Context, _ proto.Message) (proto.Message, error) {
+			seen = callctx.FromContext(ctx)
+			return testRequest(), nil
+		})
+
+	p := testPrincipal(toolv1.Clearance_CLEARANCE_RESTRICTED)
+	p.Kind = toolv1.PrincipalKind_PRINCIPAL_KIND_USER
+	p.Chain = []string{p.Subject, "agent:support-assistant"}
+	p.TokenID = "jti-do-not-forward"
+	p.Compartments = 1
+	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if seen == nil {
+		t.Fatal("the resolver saw no invocation context at all")
+	}
+
+	// Everything the hop is allowed to carry, spelled out. call_id and
+	// correlation_id are minted per call, so they are copied rather than
+	// asserted here — the test above asserts call_id against the ledger row.
+	want := &toolv1.InvocationContext{
+		Attribution: &toolv1.CallContext{
+			Tenant:        p.Tenant,
+			CorrelationId: seen.GetAttribution().GetCorrelationId(),
+		},
+		Principal: &toolv1.InvocationPrincipal{Subject: p.Subject, Kind: p.Kind},
+		Act:       []*toolv1.Act{{Subject: "agent:support-assistant"}},
+		CallId:    seen.GetCallId(),
+	}
+	if !proto.Equal(want, seen) {
+		t.Errorf("the hop carries something it was not given to carry.\ngot  %v\nwant %v",
+			seen, want)
+	}
+
+	// And nothing of the credential survives the encoding, in any form.
+	encoded, err := callctx.Encode(seen)
+	if err != nil {
+		t.Fatalf("encoding what the hop would send: %v", err)
+	}
+	if strings.Contains(encoded, p.TokenID) {
+		t.Error("the encoded header contains the token id")
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("the encoded header is not base64: %v", err)
+	}
+	if bytes.Contains(raw, []byte(p.TokenID)) {
+		t.Error("the token id crossed the hop inside the encoded context")
+	}
+}
+
+// The row says who executed the call.
+//
+// Without it a governed call that arrived through a runner is indistinguishable
+// in the ledger from one that did not, and the acceptance test's fourth
+// assertion — exec on the governed-door rows and nowhere else — has nothing to
+// read.
+func TestTheLedgerRecordsTheExecutionSubject(t *testing.T) {
+	rec := &record.Memory{}
+	core := testCore(t, rec, okResolver)
+
+	p := testPrincipal(toolv1.Clearance_CLEARANCE_INTERNAL)
+	p.Execution = "runner:agentd"
+	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+
+	events := rec.Events()
+	if len(events) != 1 {
+		t.Fatalf("%d rows, want 1", len(events))
+	}
+	if events[0].ExecutionSubject != "runner:agentd" {
+		t.Errorf("ExecutionSubject = %q, want runner:agentd", events[0].ExecutionSubject)
+	}
+}
+
+// A direct call leaves it empty, which is what makes the field mean anything:
+// a column that is always filled distinguishes nothing.
+func TestADirectCallLeavesTheExecutionSubjectEmpty(t *testing.T) {
+	rec := &record.Memory{}
+	core := testCore(t, rec, okResolver)
+
+	p := testPrincipal(toolv1.Clearance_CLEARANCE_INTERNAL)
+	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got := rec.Events()[0].ExecutionSubject; got != "" {
+		t.Errorf("ExecutionSubject = %q for a direct call", got)
+	}
+}
+
+// Every row this process writes says which plane wrote it. The lake is
+// partitioned by app, and a row with none lands under `app=`, the partition
+// nobody queries. All three terminal shapes: a success, a refusal the chain
+// decided, and step 1's refusal, which is recorded outside Invoke.
+func TestEveryLedgerRowNamesThisPlaneAsItsApp(t *testing.T) {
+	rec := &record.Memory{}
+	core := testCore(t, rec, okResolver)
+
+	_, _ = core.Invoke(context.Background(), testPrincipal(toolv1.Clearance_CLEARANCE_RESTRICTED), testProcedure, testRequest())
+	_, _ = core.Invoke(context.Background(), testPrincipal(toolv1.Clearance_CLEARANCE_PUBLIC), testProcedure, testRequest())
+	_ = core.Unauthenticated(context.Background(), testProcedure, errors.New("no token"))
+
+	events := rec.Events()
+	if len(events) != 3 {
+		t.Fatalf("%d ledger rows, want 3", len(events))
+	}
+	for _, ev := range events {
+		if ev.App != "garmd" {
+			t.Errorf("row %s (outcome %s) has app %q, want garmd", ev.ID, ev.Outcome, ev.App)
+		}
 	}
 }

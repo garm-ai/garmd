@@ -5,8 +5,9 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/policy/testdata"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/policy"
+	"github.com/garm-ai/contracts/policy/testdata"
 	"github.com/garm-ai/garmd/internal/toolplane"
 )
 
@@ -143,4 +144,20 @@ func publicPrincipal() toolplane.Principal {
 		Clearance: toolv1.Clearance_CLEARANCE_PUBLIC,
 		Verbs:     toolplane.NewVerbSet(toolv1.Verb_VERB_READ, toolv1.Verb_VERB_WRITE),
 	}
+}
+
+// fixtureCompartments is the taxonomy testdata/fixture.proto declares, read
+// from the declaration itself.
+//
+// [policy.DeclaredCompartments] is the contract module's own walk over the
+// file-level compartment declarations, exported at contracts v0.2.0. Before
+// that the walk lived in the command line tool's internal packages where
+// nothing could call it, so consumers either duplicated it or — as this
+// repository did — imported policy/testdata/testdatagarm, a hand-written copy
+// of what the code generator emits, carrying a promise to stay byte-identical
+// that nothing in either repository could check. A reading of the declaration
+// cannot drift from the declaration.
+func fixtureCompartments() []*toolv1.Decl {
+	return policy.DeclaredCompartments(
+		(*testdata.Profile)(nil).ProtoReflect().Descriptor().ParentFile())
 }

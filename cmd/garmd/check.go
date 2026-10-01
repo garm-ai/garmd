@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/contracts/ledger"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/serve"
 	"github.com/garm-ai/garmd/internal/toolplane"

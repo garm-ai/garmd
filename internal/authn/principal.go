@@ -3,8 +3,8 @@ package authn
 import (
 	"fmt"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/policy"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/policy"
 	"github.com/garm-ai/garmd/internal/toolplane"
 )
 
@@ -96,6 +96,12 @@ func Fold(c *Claims, reg *policy.Registry) (*toolplane.Principal, []string, erro
 		// constraint rather than contributing an empty one. A user who did
 		// not scope themselves must not silently scope an agent to nothing.
 		ToolSets: toolSets,
+	}
+	// From the OUTERMOST claims only, and not folded. There is nothing to
+	// intersect: a runner asserts no authority, and an `exec` on a nested act
+	// entry would be a runner claiming to have executed a hop it did not.
+	if c.Exec != nil {
+		p.Execution = c.Exec.Subject
 	}
 	// Actor is the INNERMOST actor — the party actually making the call.
 	// Empty for a direct token, which is how the ledger tells a human

@@ -2,7 +2,7 @@ package record
 
 import (
 	"context"
-	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/contracts/ledger"
 	"log/slog"
 )
 
@@ -54,6 +54,10 @@ func (r *Slog) Record(ctx context.Context, ev ledger.Event) {
 			slog.String("principal_subject", ev.PrincipalSubject),
 			slog.String("principal_actor", ev.PrincipalActor),
 			slog.String("principal_kind", ev.PrincipalKind),
+			// Empty for a direct call, which is what makes it mean
+			// anything: a column that is always filled distinguishes
+			// nothing. Attribution only — nothing in the chain read it.
+			slog.String("execution_subject", ev.ExecutionSubject),
 			slog.Int("chain_depth", ev.ChainDepth),
 			slog.String("clearance_effective", ev.ClearanceEffective),
 			slog.Any("compartments_effective", ev.CompartmentsEffective),

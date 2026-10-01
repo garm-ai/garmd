@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -52,6 +52,23 @@ type Def struct {
 	MinClearance toolv1.Clearance
 	Compartments []string
 	Sets         []string
+
+	// Audience is what this tool is FOR: PERSON, AGENT, RUNNER (design
+	// §2.5). Empty means the contract said nothing, which READS as AGENT —
+	// person-facing is always an explicit choice, so a catalogue built
+	// before audiences existed lists to a model unchanged and lists nothing
+	// to Studio.
+	//
+	// A []string of NAMES rather than a generated enum, because the enum
+	// does not exist in the garm this binary links: it is read out of the
+	// CATALOGUE's own descriptors (internal/catalogue/audience.go), by field
+	// name, so Track G's number choice cannot break the read. Names survive
+	// that; a Go enum would not.
+	//
+	// It is not a fourth gate. Nothing in the chain reads it — visibility is
+	// still verb, clearance, compartments and set — and the only thing that
+	// does is the LISTING, which is what decides what a caller is offered.
+	Audience []string
 
 	Input  protoreflect.MessageDescriptor
 	Output protoreflect.MessageDescriptor
@@ -103,6 +120,11 @@ type Def struct {
 	// WhenNotToUse is consistently worth more than a longer description:
 	// wrong-tool selection beats wrong-argument construction as a source of
 	// agent error.
+	//
+	// All three are carried because all three are published: a projection that
+	// dropped one would make an author's declaration disappear between the
+	// .proto and the model, with nothing failing.
+	WhenToUse    string
 	WhenNotToUse string
 	OnError      string
 
@@ -138,4 +160,74 @@ func (d Def) Service() string {
 		return ""
 	}
 	return rest[:i]
+}
+
+// The audiences a tool may declare (cards-and-tasks design §2.5), as the
+// names a caller asks with and a listing answers with.
+//
+// They are strings rather than a generated enum for the same reason
+// Def.Audience is: the enum is Track G's to add to garm.tool.v1, and this
+// daemon reads whatever the CATALOGUE's descriptors declare rather than
+// whatever this binary happens to link. A name is what survives that.
+const (
+	AudiencePerson = "PERSON"
+	AudienceAgent  = "AGENT"
+	AudienceRunner = "RUNNER"
+
+	// AudienceUnspecified is the declared zero, and it READS as AGENT:
+	// person-facing is always an explicit choice in the contract.
+	AudienceUnspecified = "UNSPECIFIED"
+)
+
+// NormaliseAudience turns what a caller or a contract wrote into one of the
+// names above, and reports whether it is one at all.
+//
+// It accepts the buf-prefixed spelling (AUDIENCE_PERSON) and the bare one
+// (PERSON) because garm.card.v1 already spells its enums bare and Track G has
+// not said which garm.tool.v1.Audience will be. Case-insensitive because a
+// caller types this into a JSON body.
+func NormaliseAudience(s string) (string, bool) {
+	name := strings.ToUpper(strings.TrimSpace(s))
+	if rest, cut := strings.CutPrefix(name, "AUDIENCE_"); cut && rest != "" {
+		name = rest
+	}
+	switch name {
+	case AudiencePerson, AudienceAgent, AudienceRunner:
+		return name, true
+	case "", AudienceUnspecified:
+		return AudienceUnspecified, true
+	default:
+		return "", false
+	}
+}
+
+// AudienceAdmits reports whether a tool declaring `declared` may be OFFERED
+// to a caller asking for `want`.
+//
+// An empty or absent declaration reads as AGENT — "person-facing is always an
+// explicit choice" — so a catalogue built before audiences existed lists to a
+// model exactly as it did, and lists nothing at all to Studio until its tools
+// say they are for people.
+//
+// This is half of the rule. The other half is the caller's own claims, and it
+// is unchanged: Core.Catalog intersects this with the SAME visibility
+// predicate step 2 denies with. An audience is what a tool is FOR; a set is
+// who HOLDS it; clearance is what a caller may reach. Three questions, and
+// this one answers only the first.
+func AudienceAdmits(declared []string, want string) bool {
+	if want == "" || want == AudienceUnspecified {
+		want = AudienceAgent
+	}
+	if len(declared) == 0 {
+		return want == AudienceAgent
+	}
+	for _, d := range declared {
+		if d == want {
+			return true
+		}
+		if d == AudienceUnspecified && want == AudienceAgent {
+			return true
+		}
+	}
+	return false
 }

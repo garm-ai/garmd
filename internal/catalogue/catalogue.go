@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	cataloguev1 "github.com/garm-ai/garm/contracts/garm/catalogue/v1"
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	cataloguev1 "github.com/garm-ai/contracts/garm/catalogue/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -76,6 +76,18 @@ type Catalogue struct {
 	LoadedAt time.Time
 }
 
+// DigestOf is the identity of an artifact: SHA-256 over the bytes as they were
+// handed over, before anything was parsed.
+//
+// Exported because a REFUSED artifact needs naming too. A reload that will not
+// load has no Catalogue to ask for a digest, and an error line that cannot say
+// which bytes were refused leaves an operator comparing timestamps against a
+// bucket's version history.
+func DigestOf(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // Load parses and validates an artifact. It either returns a usable catalogue
 // or an error; there is no partially-loaded state.
 //
@@ -93,8 +105,7 @@ func Load(body []byte, now func() time.Time) (*Catalogue, error) {
 
 	// Digest first, over the bytes as given. Computing it after parsing would
 	// record what this binary understood rather than what it was handed.
-	sum := sha256.Sum256(body)
-	digest := "sha256:" + hex.EncodeToString(sum[:])
+	digest := DigestOf(body)
 
 	msg := &cataloguev1.Catalogue{}
 	if err := proto.Unmarshal(body, msg); err != nil {
@@ -113,7 +124,7 @@ func Load(body []byte, now func() time.Time) (*Catalogue, error) {
 		return nil, fmt.Errorf("catalogue %s does not resolve: %w", digest, err)
 	}
 
-	defs := buildDefs(files)
+	defs := buildDefs(files, newAudienceReader(files))
 	// Every Def points at the same map. Shared and read-only: see
 	// tool.Def.FieldDocs.
 	for i := range defs {
@@ -194,7 +205,7 @@ func checkSchema(got uint32, digest string) error {
 // This is what the generated registry used to do at build time, done at boot
 // from descriptors instead — which is the whole reason a tool can be added
 // without releasing this binary.
-func buildDefs(files *protoregistry.Files) []tool.Def {
+func buildDefs(files *protoregistry.Files, aud audienceReader) []tool.Def {
 	var defs []tool.Def
 	files.RangeFiles(func(fd protoreflect.FileDescriptor) bool {
 		svcs := fd.Services()
@@ -207,7 +218,7 @@ func buildDefs(files *protoregistry.Files) []tool.Def {
 				if p == nil || p.GetExclude() {
 					continue
 				}
-				defs = append(defs, defFor(fd, svc, m, p))
+				defs = append(defs, defFor(fd, svc, m, p, aud))
 			}
 		}
 		return true
@@ -219,7 +230,7 @@ func buildDefs(files *protoregistry.Files) []tool.Def {
 }
 
 func defFor(fd protoreflect.FileDescriptor, svc protoreflect.ServiceDescriptor,
-	m protoreflect.MethodDescriptor, p *toolv1.ToolPolicy) tool.Def {
+	m protoreflect.MethodDescriptor, p *toolv1.ToolPolicy, aud audienceReader) tool.Def {
 
 	name := p.GetName()
 	if name == "" {
@@ -235,6 +246,7 @@ func defFor(fd protoreflect.FileDescriptor, svc protoreflect.ServiceDescriptor,
 		MinClearance: p.GetMinClearance(),
 		Compartments: p.GetCompartments(),
 		Sets:         p.GetSets(),
+		Audience:     aud.read(p),
 		Input:        m.Input(),
 		Output:       m.Output(),
 
@@ -257,6 +269,7 @@ func defFor(fd protoreflect.FileDescriptor, svc protoreflect.ServiceDescriptor,
 		Reversibility: p.GetEffects().GetReversibility(),
 		External:      p.GetEffects().GetExternal(),
 
+		WhenToUse:    p.GetGuidance().GetWhenToUse(),
 		WhenNotToUse: p.GetGuidance().GetWhenNotToUse(),
 		OnError:      p.GetGuidance().GetOnError(),
 	}

@@ -1,251 +1,135 @@
 # Known gaps
 
-## Built
+What this daemon does not do, and what it does on purpose that will surprise
+you. Not an inventory of what works — the code says that, and a file that
+repeats it goes stale in a way the code cannot.
 
-- `internal/catalogue` — load, verify, digest, retain. `garmd serve
-  --catalogue` reports `(version, digest)`, what the catalogue costs, and
-  lists what it serves. A byte ceiling guards pathological input;
-  `--max-tools` is an opt-in budget for catching a deployment pointed at the
-  wrong catalogue.
-- `internal/transport` — the Invoker and Discoverer ports, with a NATS
-  adapter. Invocation, and discovery over `$SRV.INFO`.
-- `internal/tool` — `Def`, the in-memory declaration.
-- `internal/serve` — the agent-facing surface. Dynamic dispatch: a request is
-  unmarshalled into a message built from a catalogue descriptor, routed over
-  NATS, and the reply unmarshalled into another. No generated types anywhere.
-- Reconciliation. A service advertises its descriptor hash; the catalogue
-  records one per proto package; `garmd` compares them every 30s and refuses
-  to route on a mismatch. Silence is not agreement, and a failed sweep leaves
-  the previous verdict standing.
-- `internal/authn` — step 1. JWT over a cached JWKS, issuer and audience
-  allowlists, and delegation folding that can only narrow.
-- `internal/record` — where an event goes. Its SHAPE is in the contract,
-  because a tool call and a generation call must produce one record type.
-- `internal/record/jetstream` — the ledger, batched onto `GARM_LEDGER`.
-  Flushes on an interval, a count AND a byte bound, and on `Close`. Anything
-  it cannot publish goes to a fallback Recorder — normally slog — so a broker
-  outage costs durability and not rows. It never returns an error and never
-  blocks, because `ledger.Recorder` is documented "must not fail the call".
-- `internal/audit/jetstream` — the audit Sink, on `GARM_AUDIT`. One
-  synchronous publish per write, the ack awaited, the error returned. It is
-  the exact opposite of the ledger's publisher in every respect, and
-  deliberately: a write-ahead still sitting in a buffer is a write-ahead that
-  never happened.
+## What nothing here checks
 
-**The chain is wired.** Every call goes through `toolplane.Core.Invoke` and by
-no other route: the NATS hop is registered as the chain's resolver, so
-reaching a tool means passing the steps first. `serve/e2e_test.go` proves it
-over a real broker with a real verifier — a valid token reaches the tool, and
-an absent, expired or under-cleared one never does.
+**A discovery round that hears nothing cannot tell an empty plane from an
+unreachable one.** Discovery is a scatter-gather, so silence is the only thing
+a window can end on. `Services` marks a round incomplete when a reply was
+dropped, when the ceiling closed mid-collection, or when a service answered
+fewer instances than the enumeration counted — but a round in which NOTHING
+arrived is reported as a complete answer about an empty plane, because
+reporting it as incomplete would freeze the reconciler on a deployment that
+legitimately has nothing running. A broker that is up and refusing therefore
+still reads as "nothing is deployed". Closing it needs a second signal about
+the broker itself, not a longer window.
 
-The chain is derived from the catalogue generation rather than built beside
-it, because the compartments it decides with and the plans it compiles both
-come out of the artifact. Reload replaces the pair or neither.
+**Per-service rounds are driven by the plane's own enumeration, not by the
+catalogue.** `$SRV.INFO.<name>` addresses a micro service by the name it
+registered, and micro validates that against `^[A-Za-z0-9\-_]+$` — never a
+proto FQN. `agentd` derives its name with `wire.MicroServiceName`, so it is
+predictable; `tool-go` takes whatever string the tool's author passes to
+`garmtool.New`, and the reference plane's services are called `web`,
+`accounts`, `payments`. So the catalogue cannot name the services it declares,
+and discovery asks `$SRV.PING` first to find out. The cost is a round trip per
+sweep. Closing it means `tool-go` naming its service from `wire`, or a
+catalogue that records the micro name — until then, driving the INFO rounds
+from the catalogue would silently discover nothing.
 
-## Not built
+**`Retention()` is an assertion, not a measurement.** The forwarder acks an
+audit message once it has flushed it onward, which deletes it, so the stream's
+own `MaxAge` is a buffer window of hours rather than the years a tool asks for
+in `retain_days`. The real retention is the lifecycle policy on the object
+store behind the forwarder, which this process cannot read. The operator types
+it and the mount check compares against it, so a value longer than the truth
+makes the check pass while the promise is false. It is discovered by whoever
+goes looking for the row.
 
-**Steps 4, 5, 7 and 10 have no implementation here, and a tool that declares
-them will not mount.** Instance authorization, grant verification and notify
-are `CoreConfig` seams, and `AddTools` refuses any tool declaring supervision
-the Core has not been given: a MODE_GRANT tool with no `GrantVerifier`, an
-authorization block with no `FGAChecker`, a MODE_NOTIFY tool with no
-`Notifier`. `serve.Prepare` runs that at startup, so the refusal stops the
-process rather than arriving one 503 at a time after a green deploy.
-
-The refusal reads what THIS Core was configured with, not what the build
-contains, so supplying a verifier makes the same tool mount. It is an
-allowlist: an enum member that does not exist yet refuses by construction
-rather than falling through.
-
-Nothing in this repository currently supplies any of the three. So in
-practice a catalogue containing an approval-gated tool cannot be served at
-all — which is the intended failure, and the reason it is safe that the steps
-are unimplemented.
-
-The audit block no longer refuses unconditionally. `LEVEL_AUDIT`,
-`fail_closed` and `retain_days` are all honourable now that a Sink exists —
-the first two by the Sink being configured at all, the third by comparison
-against the retention the operator asserted. `record_request` and
-`record_response` still refuse, because a ledger `Event` carries no payload
-and neither publisher invents one.
-
-The refusal is still worth its shape. Four of the five fields used to be
-dropped by the catalogue loader, which took `GetLevel()` and nothing else: a
-tool could ask for a blocking, seven-year, payload-recording trail and mount
-cleanly against a recorder writing to stdout, just by saying `LEVEL_LEDGER`.
-
-## The audit stream is implemented, and stops short of the lake
-
-`garm/contracts/audit.Sink` is the durable, separately-retained half of the
-record, and the half that MAY refuse a call. The chain uses it: an audited
-tool writes its intent before the resolver runs and its outcome after, and a
-failed write-ahead refuses the call when the tool declared `fail_closed`.
-Write-ahead rather than write-after because the alternative does not work for
-anything irreversible — recording afterwards and failing the response tells
-the caller the payment did not happen, when it did.
-
-`internal/audit/jetstream` implements it. `--audit-stream-retention` turns it
-on; without the flag `Audit` stays nil, and a catalogue containing an audited
-tool still refuses to start. Nil cannot mean "audited tool served unaudited".
-
-**`Retention()` is an assertion, not a measurement, and it is the sharp edge
-here.** The forwarder acks a message as soon as it has flushed it onward,
-which deletes it, so the stream's own `MaxAge` is a buffer window of hours —
-nothing like the years a tool asks for in `retain_days`. The real retention is
-the lifecycle policy on the object store behind the forwarder, which this
-process cannot read. So the operator types it, the mount check compares
-against it, and a value longer than the truth makes that check pass while the
-promise is false. It is discovered by whoever goes looking for the row.
-
-**The forwarder is not here.** Nothing drains either stream to a lake — that
-is `forwarder`, still in the private monorepo. Until it exists the streams
-are buffers, and `GARM_AUDIT` is a `DiscardNew` stream that will eventually
-fill and start refusing calls, which is the correct direction and still an
-outage.
-
-**Startup asserts the audit stream's configuration and refuses to serve a
-lossy one.** `DiscardOld` — JetStream's default — drops the oldest messages
-while every publish goes on acking, so `fail_closed` would keep succeeding
-against records quietly evaporating. `MemoryStorage` makes the ack mean
-nothing. Both stop the process. Fewer than three replicas only warns, because
-a single-node dev broker is legitimate and refusing there gets the check
-turned off. A stream that does not exist yet is also only a warning: publishes
-to a subject no stream captures fail loudly on every call.
-
-**Nothing creates the streams.** garmd asserts and refuses; provisioning is an
-operator's, because a daemon that creates its own audit stream creates it with
-whatever defaults it was compiled with, on a cluster nobody inspected.
-
-**The ledger can be durable now, and is not by default.** `--ledger-stream`
-publishes batches to `GARM_LEDGER`; without it step 9 is still a line on
-stdout that a log rotation deletes. The flag is off by default because
-switching a deployment's ledger to a stream nothing drains yet would be a
-change of failure mode disguised as a default.
-
-The batching is not an optimisation of an already-async `Record`. The costs
-are per event — a goroutine and a marshal each — and above all
-`WithPublishAsyncMaxPending` is a hard ceiling rather than backpressure: when
-the pending window fills, publishing errors and metering degrades to log
-lines under exactly the load worth metering.
-
-`audit.record_request` and `audit.record_response` still refuse at mount. A
-ledger `Event` carries no payload, and neither publisher invents one.
-
-**A quarantine refusal leaves no ledger row.** The surface refuses a tool
-whose service implements a different contract BEFORE the chain runs, so that
-the call cannot look like it happened. The cost is that the refusal is not
-ledgered — and a contract mismatch in production is exactly the event someone
-will later want a row for. Wiring the reconciler in as the chain's
-`AvailabilitySource` would fix it; the two checks would then need deciding
+**A quarantine refusal leaves no ledger row.** A tool whose service implements
+a different contract is refused before the chain runs, so the call cannot look
+like it happened — and a contract mismatch in production is exactly the event
+someone will later want a row for. Wiring the reconciler in as the chain's
+`AvailabilitySource` would fix it, and the two checks would then need deciding
 between rather than both existing.
 
-**The verifier's compartment registry is built once, at boot.** It comes from
-the catalogue, so a reload that ADDS a compartment does not reach the
-verifier: tokens asserting the new name have it dropped, and callers lose
-authority until a restart. It fails in the safe direction — narrower, never
-wider — and it fails silently, which is the objectionable half.
-
-**No MCP surface, no catalogue service, no second listener.** The dev IdP's
-tool-list panel needs the catalogue service and reports that it cannot reach
-garm until then.
-
-## Drift with devkit is caught, for the personas devkit.json covers
-
-`garm-ai/devkit` mints the dev tokens this verifier reads, and neither may
-import the other: a module that can assert any identity must not be in the
-dependency graph of one that decides what an identity may do. CI asserts it
-from both sides.
-
-The seam between minting and verifying is a cross-repository CI check now,
-not a same-process test. `internal/conformance` loads a suite of cases from
-`spec/conformance/identity/devkit.json`, drives the running devkit IdP over
-HTTP to mint a token per case, verifies it with this repository's own
-`internal/authn`, and asserts the resulting `Principal` against the case's
-expectation. The `conformance` job in `.github/workflows/ci.yml` starts the
-dev IdP, runs that suite, and fails the build on any disagreement — with no
-build-time edge between the two repositories: devkit is `checkout`'d and run
-as a process, never imported, and a dedicated step re-asserts `go list -deps
--test ./...` never names `garm-ai/devkit`.
-
-What remains unguarded, in four parts:
-
-**The suite covers the five personas in `devkit.json` and no others**, so a
-claim shape only a different persona would exercise is still unchecked.
-
-**The suites live in this repository.** `internal/conformance/suites/` holds
-`devkit.json` and `sts.json`. They were in the private `spec` repo, which made
-this a public repository's CI reaching into a private one: it needed a
-`GARM_CI_TOKEN` secret, and a pull request from a fork is handed no secrets at
-all, so the job had to skip there. Drift was caught for maintainers and not for
-outside contributors — the people most likely to change a claim shape without
-knowing what depends on it.
-
-Moving them here costs the arrangement its third party. The verifier now owns
-the expectations it verifies against, so a fold bug and a matching expectation
-edit can land in one commit. That is a real weakening, and it is why these
-files are DATA a reviewer reads rather than code: a changed expectation shows
-up in a diff as a changed fold, which is exactly the thing worth arguing about.
-
-**The `aud` array form — the bug this branch fixes — is never exercised by
-the drift check.** `devkit` mints `aud` as a bare string, so every token the
-conformance run sees carries the scalar form. A green conformance run is
-therefore NOT evidence that the array-form audience fix works; the only thing
-covering it is the audience table in `internal/authn/verify_test.go`, which
-drives the verifier directly with `aud` as a string, as an array containing
-the audience, as an array not containing it, and absent. Closing this would
-mean devkit gaining a way to mint the array form and the suite gaining a case
-that asks for it.
-
-**The compartment vocabulary is the suite's own declaration, not a real
-catalogue.** `internal/conformance.Run` builds the `policy.Registry` from
-`s.Compartments` — the list in `devkit.json` — so the `dropped` assertions
-prove the verifier drops a name the SUITE does not declare, not one no
-deployed catalogue declares. The design record lists "the compartment
-vocabulary against a real catalogue" among the gaps this job closes; that one
-is not closed. What would close it is checking both sides against a built
-catalogue — the `garm claims check --against` shape — rather than against a
-vocabulary the suite asserts about itself.
-
-## Coverage
-
-`toolplane` is the outlier at 53%, and it is the package that decides
-everything. `cmd/garmd` is at 3%: flag parsing around a listener, with the
-parts worth testing covered where they live — the one test there pins that no
-audit configuration leaves the Sink nil rather than typed-nil, which every
-mount refusal depends on.
-
-The two publishers are at 92% (`internal/audit/jetstream`) and 99%
-(`internal/record/jetstream`), both against a real embedded broker for
-everything a broker decides — the ack, the duplicate id, a full `DiscardNew`
-stream. Nothing in either file skips when something is missing: a test file
-whose tests all skip reports `ok` while covering none of its subject.
-
-Three test files did NOT come across from the monorepo, each for a reason
-rather than by omission: `mount_test.go` exercises the generated-registry
-mount path that the catalogue replaces, `core_invocation_context_test.go`
-drives the NATS resolver directly, and the server-level tests target an HTTP
-server that `serve` replaced. What they covered still needs covering, against
-the new shapes.
-
-**Producer/consumer agreement is untested** — that a real `garm-ai/tool-go`
+**Producer/consumer agreement is untested**: that a real `garm-ai/tool-go`
 service and this adapter agree on the wire. The faithful version needs the
-dependency CI exists to refuse, so it belongs in a cross-repo test where both
-sides exist, not in a fake here and not in a skip.
+dependency CI exists to refuse, so it belongs in a cross-repository test where
+both sides exist, not in a fake here and not in a skip.
 
-## Reachable but unexercised
+**The conformance suite covers the cases in `suites/sts.json` and no others.**
+A claim shape only a different persona or a different tool declaration would
+exercise is unchecked, and the STS is pinned at `v0.3.0` rather than a branch,
+so the suite proves agreement with a released STS rather than with `main`.
+Two specific holes inside it: `devkit` mints `aud` as a bare string, so the
+array form is covered only by `internal/authn/verify_test.go` driving the
+verifier directly; and the compartment vocabulary is the suite's own
+declaration rather than a built catalogue, so a `dropped` assertion proves the
+verifier drops a name the SUITE does not declare.
 
-**Client-name disambiguation.** `internal/catalogue` prefixes colliding short
-names deterministically, and it is tested — but `garm catalogue build` refuses
-to produce a catalogue that needs it, because L3 still treats a reused name as
-an error.
+**The card vocabulary is a fixture, not the linked type.**
+`internal/toolplane/testdata/card.proto` and `internal/conformance/testdata/`
+are byte copies of the contract module's `proto/garm/card/v1/card.proto`, kept
+that way because CI refuses a build dependency on `garm/card`. Nothing
+automatically compares them, so the copies drift the day the contract changes
+and nobody re-copies.
 
-That is the intended order, not an oversight: L3 relaxes only after the MCP
-surface dispatches on the disambiguated name, and relaxing it first would
-reintroduce the misroute L3 prevents. See the design record,
-`decisions/2026-09-25-mcp-dispatches-on-the-fqn.md`.
+## Deliberate, and worth knowing
 
-## Deliberately elsewhere
+**Steps 4, 7 and 10 have no implementation, and a catalogue declaring them
+will not mount.** Instance authorization and notify are `CoreConfig` seams;
+`AddTools` refuses a tool declaring supervision the Core was not given, and
+`serve.Prepare` runs that at startup. The process refuses to start rather than
+serve a tool ungated while its schema says it is supervised. Step 5 IS
+implemented — `garmd serve --grant-issuer` constructs it, and without the flag
+a `MODE_GRANT` catalogue does not mount.
 
-**`garmmcp`, `forwarder` and the generation plane** are still in the private
-monorepo. The generation plane is parked there on purpose; the others arrive
-as their surfaces are ported.
+**The grants bucket's expiry is derived once, at startup.** A JetStream
+bucket's TTL belongs to the deployment rather than to this process, so a
+reload cannot widen it. What a reload does instead is refuse: a generation
+whose longest `max_grant_age` plus the clock skew exceeds the retention the
+bucket reports keeps the previous generation serving, and only a restart
+re-derives it. So a catalogue that lengthens an approval ceiling cannot be
+rolled out by reload alone.
+
+**Nothing creates the streams, and nothing drains them.** garmd asserts the
+audit stream's configuration and refuses a lossy one — `DiscardOld` or
+`MemoryStorage` stop the process — but provisioning is an operator's, because
+a daemon that creates its own audit stream creates it with whatever defaults it
+was compiled with. The forwarder that would drain either stream to a lake is
+not here, so `GARM_AUDIT` is a `DiscardNew` buffer that will eventually fill
+and start refusing calls. That is the correct direction and still an outage.
+
+**The ledger is not durable by default.** `--ledger-stream` publishes to
+`GARM_LEDGER`; without it step 9 is a line on stdout that a log rotation
+deletes. Off by default because switching a deployment's ledger to a stream
+nothing drains yet is a change of failure mode disguised as a default.
+
+**A reload can hold three copies of the descriptors.** The pre-flight builds
+the candidate's chain from bytes in hand, `Store.Reload` parses the same bytes
+again into the generation it installs, and the chain is built again for that
+one. The catalogue that is serving is never one of the copies dropped, so it
+is a peak rather than a leak; closing it means splitting `Store.Reload` into a
+validate half and an install half.
+
+**`ListTools` has no cap and no filter on the wire.** No page size, no ceiling
+on the number of tools and none on the bytes — `maxRequestBytes` guards the
+request side only. agentd's client refuses an answer over 16 MiB as a terminal
+step failure, so the first symptom of a large catalogue is a run that cannot
+start. `toolplane.CatalogFilter` is the mechanism when it is needed; the
+endpoint hard-wires the zero value because the spec fixes the request as `{}`.
+
+**Discovery is a poll.** `Watch` returns an error saying so rather than a
+channel that never fires.
+
+## Enforced rather than written down
+
+These are asserted by `.github/workflows/ci.yml`, which is the difference a
+reviewer most needs to know. A grep that matches nothing passes while asserting
+nothing, so each one is checked under both tag sets with a fail-closed guard on
+empty output.
+
+- No dependency on a token minter (`devkit`, `sts`), tests included.
+- No build dependency on any repository that implements tools.
+- No dependency on `contracts/garm/agent` — garmd stays agent-blind.
+- No dependency on `contracts/garm/card` — garmd knows that type by NAME.
+- No build dependency on the embedded broker or a storage client.
+- No build dependency on the tool-side runtime.
+- **No database, no migrations.** garmd decides and records and stores nothing
+  a tool could ask it for; state that outlives a request would make this proxy
+  a second source of truth competing with the ledger. The check forbids
+  `database/sql` — the choke point every idiomatic driver goes through — plus
+  the drivers, ORMs and migration runners that reach a database without it.

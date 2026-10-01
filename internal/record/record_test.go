@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/contracts/ledger"
 
 	"github.com/garm-ai/garmd/internal/record"
 )
@@ -193,5 +193,34 @@ func TestACancelledRequestStillRecords(t *testing.T) {
 	}
 	if got["outcome"] != string(ledger.OutcomeInterrupted) {
 		t.Errorf("outcome = %v, want %v", got["outcome"], ledger.OutcomeInterrupted)
+	}
+}
+
+// The default ledger is this recorder, and a field it does not print is a
+// field nobody can query.
+//
+// `execution_subject` rides the JetStream path for free — ledger.ToProto
+// carries every field — but a deployment without `--ledger-stream` has only
+// these lines, and "which of these rows came from a runner" has to be
+// answerable there too. It is in the tool block because that is where
+// attribution lives: a generation call has no runner to name.
+func TestTheExecutionSubjectIsOnTheToolLine(t *testing.T) {
+	toolCall := logged(t, ledger.Event{
+		Tool:             "t.v1.get_status",
+		PrincipalSubject: "user:1",
+		ExecutionSubject: "runner:agentd",
+	})
+	if got := toolCall["execution_subject"]; got != "runner:agentd" {
+		t.Errorf("execution_subject = %v, want runner:agentd", got)
+	}
+
+	direct := logged(t, ledger.Event{Tool: "t.v1.get_status", PrincipalSubject: "user:1"})
+	if got := direct["execution_subject"]; got != "" {
+		t.Errorf("execution_subject = %v for a direct call", got)
+	}
+
+	generation := logged(t, ledger.Event{Tenant: "acme", Alias: "fast"})
+	if _, present := generation["execution_subject"]; present {
+		t.Error("a call with no tool wrote execution_subject")
 	}
 }

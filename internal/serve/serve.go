@@ -28,6 +28,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,8 +38,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/dynamicpb"
 
-	"github.com/garm-ai/garm/contracts/audit"
-	"github.com/garm-ai/garm/contracts/ledger"
+	"github.com/garm-ai/contracts/audit"
+	"github.com/garm-ai/contracts/ledger"
+	"github.com/garm-ai/garmd/internal/authn"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/grants"
 	"github.com/garm-ai/garmd/internal/tool"
@@ -151,6 +153,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The taxonomy step 1 folds this token's compartment names against, and
+	// it is THIS generation's rather than whatever the verifier happens to
+	// hold.
+	//
+	// A compartment set is a bitset numbered over a whole generation's
+	// declarations, so a principal folded under one generation and judged
+	// under another does not hold a narrower authority or a wider one — it
+	// holds a DIFFERENT one, and the tool it walks through is whichever tool
+	// the bits happen to name here. The verifier's own source swaps on the
+	// reload's clock and this plane swaps on the request's; pinning the
+	// plane's registry is what makes the two the same generation for the
+	// length of one call.
+	r = r.WithContext(authn.WithRegistry(r.Context(), pl.reg))
+
+	// Where the chain will write the id of the row this call produces. It has
+	// to be established before step 1, because step 1's own refusal is
+	// ledgered too.
+	var eventID string
+	r = r.WithContext(toolplane.WithEventID(r.Context(), &eventID))
+
 	// A presented grant travels on the context to step 5, the same way the
 	// bearer token travels to step 1. Lifted, never verified here: a surface
 	// that judged a grant would be a second place approvals are decided.
@@ -171,7 +193,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// and the row for it belongs in the same place as every other outcome.
 	principal, err := h.principal(r)
 	if err != nil {
-		refuse(w, pl.core.Unauthenticated(r.Context(), r.URL.Path, err))
+		refused := pl.core.Unauthenticated(r.Context(), r.URL.Path, err)
+		setEventID(w, eventID)
+		refuse(w, refused)
+		return
+	}
+
+	// After step 1 and before the route lookup, because it is not a route: it
+	// is the catalogue itself, projected. Reaching it means having said who you
+	// are, exactly as reaching a tool does.
+	if r.URL.Path == ListToolsPath {
+		h.listTools(w, r, pl, principal)
 		return
 	}
 
@@ -221,6 +253,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Steps 2 through 10. The hop is registered as this chain's resolver, so
 	// there is no way to reach the tool that does not pass through here.
 	resp, err := pl.core.Invoke(r.Context(), principal, def.FullMethod, req)
+	// Before the branch, so the id is on the response whether the chain
+	// answered or refused. Both produced a row.
+	setEventID(w, eventID)
 	if err != nil {
 		h.writeChainErr(w, def, err)
 		return
@@ -252,6 +287,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // look like a way to authenticate.
 const GrantHeader = "Garm-Grant"
 
+// EventHeader names the ledger row this call produced.
+//
+// It is the join key. The ledger holds the whole story of a call — who was
+// asked, what was refused, which fields were redacted — and the caller holds
+// none of it, so a caller reconciling its own step record against the ledger
+// otherwise has only a timestamp, which stops discriminating the moment two
+// calls land in the same second.
+//
+// It is written only when a row actually exists. A header naming a row nobody
+// can find is worse than no header: it sends whoever is debugging to query a
+// ledger that will never answer.
+const EventHeader = "Garm-Event-Id"
+
+// setEventID puts the row's id on the response, if there is one.
+//
+// Called before the status is written on every path that ran the chain, and
+// never on one that did not. Header mutation after WriteHeader is silently
+// dropped by net/http, which is exactly the kind of failure that would pass
+// every test that only checks a status.
+func setEventID(w http.ResponseWriter, id string) {
+	if id != "" {
+		w.Header().Set(EventHeader, id)
+	}
+}
+
 // writeGrantRequired answers a gated call that arrived without one.
 func writeGrantRequired(w http.ResponseWriter, def tool.Def) {
 	w.Header().Set("Content-Type", contentJSON)
@@ -262,6 +322,43 @@ func writeGrantRequired(w http.ResponseWriter, def tool.Def) {
 		"tool":                  def.FQN,
 		"material_fields":       def.MaterialFields,
 		"max_grant_age_seconds": int(def.MaxGrantAge.Seconds()),
+	})
+}
+
+// writeViolations answers a request that broke its own contract, naming the
+// violations the chain admitted for this caller.
+//
+// Connect's error shape with one field added, so a Connect client reads the
+// code and a model reads the list. `violations` is always an array: a request
+// whose only broken rules name fields this caller may not see gets `[]`, and
+// learns exactly as much as it did before this existed.
+func writeViolations(w http.ResponseWriter, v *toolplane.ValidationRefusal) {
+	w.Header().Set("Content-Type", contentJSON)
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code":       connect.CodeInvalidArgument.String(),
+		"message":    scrubbedMessage(connect.NewError(connect.CodeInvalidArgument, v)),
+		"violations": v.Violations,
+	})
+}
+
+// writeToolRefused answers a call the tool itself refused.
+//
+// The status is the tool's code, parsed here rather than mapped: the chain
+// only ever builds a ToolRefusal for a code in its own table, all of which
+// are HTTP statuses, so a value that will not parse is a bug on this side
+// and answers 500 rather than a status nobody chose.
+func writeToolRefused(w http.ResponseWriter, r *toolplane.ToolRefusal) {
+	status, err := strconv.Atoi(r.Code)
+	if err != nil || status < 400 || status > 599 {
+		status = http.StatusInternalServerError
+	}
+	w.Header().Set("Content-Type", contentJSON)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"code":      "tool_refused",
+		"tool_code": r.Code,
+		"message":   r.Message(),
 	})
 }
 
@@ -315,6 +412,47 @@ func (h *Handler) writeChainErr(w http.ResponseWriter, def tool.Def, err error) 
 	// habit that leaks somewhere else later.
 	if errors.Is(err, grants.ErrGrantRequired) {
 		writeGrantRequired(w, def)
+		return
+	}
+
+	// The other refusal with a next move: repair the request. The chain has
+	// already decided which violations this caller may see — the ones whose
+	// fields are in the input schema it was shown — so the surface lists
+	// what it was handed and adds nothing. The full detail is on the row.
+	var invalid *toolplane.ValidationRefusal
+	if errors.As(err, &invalid) {
+		writeViolations(w, invalid)
+		return
+	}
+
+	// The tool answered with a code. The status IS that code, so a caller
+	// that already knows HTTP reads it without a table, and the body says
+	// which tool code and a sentence this daemon wrote — never the tool's.
+	var refused *toolplane.ToolRefusal
+	if errors.As(err, &refused) {
+		writeToolRefused(w, refused)
+		return
+	}
+
+	// An approval WAS presented and is not good for this call, or could not be
+	// checked at all. Either way a denial: the caller must stop rather than
+	// fetch another approval, and must not be told which of the two it was —
+	// "we could not check" tells a prober when this deployment's dependencies
+	// are down. Without this branch it arrives carrying no connect code,
+	// becomes "internal", and answers 500.
+	if errors.Is(err, grants.ErrRefused) || errors.Is(err, grants.ErrUnavailable) {
+		// The operator's half of the same answer. A caller presenting a
+		// tampered approval is the system working and is deliberately NOT
+		// logged here; a verifier that is half-configured, a key set that
+		// could not be fetched or a replay cache that could not answer is this
+		// deployment failing, and the one person who can fix it is the one
+		// person the wire cannot tell. The grant itself is never logged: the
+		// verifier's sentences carry no token, by construction.
+		if h.Log != nil && errors.Is(err, grants.ErrUnavailable) {
+			h.Log.Error("an approval could not be checked; this deployment cannot "+
+				"verify grants right now", "fqn", def.FQN, "err", err)
+		}
+		refuse(w, connect.NewError(connect.CodePermissionDenied, err))
 		return
 	}
 	if errors.Is(err, transport.ErrUnreachable) {

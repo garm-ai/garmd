@@ -15,12 +15,12 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/garm-ai/garm/contracts/audit"
-	"github.com/garm-ai/garm/contracts/callctx"
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/contracts/ledger"
-	"github.com/garm-ai/garm/policy"
-	"github.com/garm-ai/garm/policy/redact"
+	"github.com/garm-ai/contracts/audit"
+	"github.com/garm-ai/contracts/callctx"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/ledger"
+	"github.com/garm-ai/contracts/policy"
+	"github.com/garm-ai/contracts/policy/redact"
 )
 
 // Core is the governance chain, with no transport in it.
@@ -56,6 +56,13 @@ type Core struct {
 	// is an interface backed by a pointer for every real implementation, so
 	// it is safe and cheap to use as a map key directly.
 	plans map[protoreflect.MessageDescriptor]*policy.Plan
+
+	// cards marks the message types a garm.card.v1.Card is reachable from,
+	// so step 8 knows whether to run the card walk at all. Compiled once per
+	// descriptor beside the plan and memoised on first sight otherwise: a
+	// response whose live descriptor was never mounted must not skip the
+	// walk silently, so a miss computes rather than answering false.
+	cards map[protoreflect.MessageDescriptor]bool
 
 	// need is the compartment set each tool resolves to, keyed by route.
 	//
@@ -187,6 +194,7 @@ func NewCore(cfg CoreConfig) (*Core, error) {
 		grants:    cfg.Grants,
 		notifier:  cfg.Notifier,
 		plans:     map[protoreflect.MessageDescriptor]*policy.Plan{},
+		cards:     map[protoreflect.MessageDescriptor]bool{},
 		need:      map[string]policy.CompartmentSet{},
 		tools:     map[string]ToolDef{},
 		resolvers: map[string]registration{},
@@ -258,6 +266,7 @@ func (c *Core) AddTools(tools []ToolDef) error {
 				return fmt.Errorf("tool %q: %w", t.Name, err)
 			}
 			c.plans[md] = plan
+			c.cards[md] = containsCard(md)
 		}
 		need, err := c.reg.Set(t.Compartments)
 		if err != nil {
@@ -268,6 +277,20 @@ func (c *Core) AddTools(tools []ToolDef) error {
 	}
 	return nil
 }
+
+// Registry is the compartment taxonomy this Core decides with.
+//
+// Exposed because a Principal's compartments are a BITSET, and which bit a
+// name gets depends on the whole generation — policy assigns them by sorted
+// index over the declarations this Core was built from. So the fold that
+// produces a principal and the chain that reads it have to be on the same
+// generation, and the only way for a surface to guarantee that is to hand the
+// fold the registry the chain is using. See authn.WithRegistry.
+//
+// The Registry itself is immutable once built, so handing it out shares no
+// mutable state: a reload builds a new Core with a new one rather than
+// changing this.
+func (c *Core) Registry() *policy.Registry { return c.reg }
 
 // SetAvailability wires step 6's AvailabilitySource (svcwatch.go's
 // ServiceWatcher, in production). It is a separate call from NewCore rather
@@ -442,6 +465,9 @@ func (c *Core) invoke(
 	// escapes with an unset outcome should read as "blocked", never as
 	// "fine".
 	ev := c.newEvent(p, procedure)
+	// Before anything can return. Every path below this line is terminal for
+	// exactly one row, and the surface needs its id whichever one fires.
+	noteEventID(ctx, ev.ID)
 	var (
 		tool  ToolDef
 		abort any
@@ -573,7 +599,7 @@ func (c *Core) invoke(
 	if err := c.checkInputWrites(p, req, &ev); err != nil {
 		return nil, err
 	}
-	if err := c.validateInput(req, &ev); err != nil {
+	if err := c.validateInput(p, tool, req, &ev); err != nil {
 		return nil, err
 	}
 	if err := c.fgaPre(ctx, p, tool, req, &ev); err != nil {
@@ -608,10 +634,23 @@ func (c *Core) invoke(
 		return nil, fmt.Errorf("%w: the audit record could not be written", errUnavailable)
 	}
 
-	ctx = c.withInvocationContext(ctx, p)
+	ctx = c.withInvocationContext(ctx, p, ev.ID)
 
 	resp, err = c.resolve(ctx, procedure, req, fn)
 	if err != nil {
+		// A tool that ran and ANSWERED with a code it chose — off the
+		// allowlist, nothing there, an upstream that failed — is a refusal
+		// the tool decided, and the row says so: denied, kind tool_refused,
+		// the tool's own words in the detail. It is not this daemon's
+		// failure, and answering it as one ("internal") is what made a model
+		// retry a 404 three times. Only the codes the chain understands;
+		// anything else is the failure path below.
+		if code, message, refused := toolRefusalOf(err); refused {
+			ev.Outcome = ledger.OutcomeDenied
+			ev.ErrorKind = ErrorKindToolRefused
+			ev.ErrorDetail = "tool refused " + code + ": " + message
+			return nil, &ToolRefusal{Code: code}
+		}
 		// The single most likely leak in this design: a resolver error
 		// routinely interpolates the value it was protecting (e.g. "user
 		// with email ada@corp.com not found"), and policy.Sanitize
@@ -635,7 +674,7 @@ func (c *Core) invoke(
 	if resp, err = c.fgaPost(ctx, p, tool, resp, &ev); err != nil {
 		return nil, err
 	}
-	if err := c.sanitize(ctx, p, resp, &ev); err != nil {
+	if err := c.sanitize(ctx, p, tool, resp, &ev); err != nil {
 		return nil, err
 	}
 	ev.Outcome = ledger.OutcomeOK
@@ -684,6 +723,19 @@ func (c *Core) auditOutcome(ctx context.Context, t ToolDef, ev ledger.Event) {
 	}
 }
 
+// AppName is the ledger's `app` on every row this process writes.
+//
+// `app` is the plane that WROTE the row, not the tool it is about. The
+// sink partitions the lake by (date, app) and the JetStream subject is
+// `garm.v1.ledger.<tenant>.<app>` (contracts/wire.LedgerSubjectFor), so it
+// is the axis a consumer filters a whole plane's rows on — agentd writes its
+// rows under "agentd" and garmd's landed under `app=` with nothing in it,
+// which is the partition nobody queries. The declaring service is not the
+// right value: it is already on the row, as the package prefix of `tool`,
+// and it would spread one plane's rows over one partition per catalogue
+// package, which is the join the column exists to avoid.
+const AppName = "garmd"
+
 // newEvent opens the one ledger row this call will produce.
 //
 // Attribution is recorded for every outcome, not just successful ones —
@@ -694,6 +746,7 @@ func (c *Core) auditOutcome(ctx context.Context, t ToolDef, ev ledger.Event) {
 // row after a rebuild (spec §9).
 func (c *Core) newEvent(p *Principal, procedure string) ledger.Event {
 	ev := ledger.Event{
+		App: AppName,
 		// The id belongs to the CALL and is minted here, where the call is
 		// first observed, because everything downstream dedupes on it.
 		// Delivery to the lake is at-least-once, so a redelivered event has
@@ -720,6 +773,9 @@ func (c *Core) newEvent(p *Principal, procedure string) ledger.Event {
 	ev.ChainDepth = len(p.Chain)
 	ev.ClearanceEffective = p.Clearance.String()
 	ev.CompartmentsEffective = c.reg.Names(p.Compartments)
+	// Empty for a direct call, which is what makes it mean anything: a column
+	// that is always filled distinguishes nothing.
+	ev.ExecutionSubject = p.Execution
 	return ev
 }
 
@@ -734,6 +790,7 @@ func (c *Core) newEvent(p *Principal, procedure string) ledger.Event {
 // caller, because the surface is where step 1 happens.
 func (c *Core) Unauthenticated(ctx context.Context, procedure string, cause error) error {
 	ev := c.newEvent(nil, procedure)
+	noteEventID(ctx, ev.ID)
 	ev.ErrorDetail = "no principal for " + procedure
 	if cause != nil {
 		ev.ErrorDetail += ": " + cause.Error()
@@ -829,7 +886,21 @@ func (c *Core) verifyGrant(
 	// human saw. Without it an approval covers the tool for a window rather
 	// than the call, and fifteen minutes of authority to call initiate_payment
 	// is not what anybody clicking approve believes they are giving.
-	if err := c.grants.Verify(ctx, p, tool, req); err != nil {
+	//
+	// The binding destination is seeded here and read whatever the verifier
+	// answers, because what a REFUSED grant was bound to is a row somebody
+	// investigating wants as much as an accepted one's: "an approval for task
+	// X was presented and rejected" and "no approval naming a task was ever
+	// presented" are different facts.
+	var binding GrantBinding
+	err := c.grants.Verify(withGrantBinding(ctx, &binding), p, tool, req)
+	if binding.TaskID != "" {
+		if ev.Tags == nil {
+			ev.Tags = map[string]string{}
+		}
+		ev.Tags[LedgerTagTaskID] = binding.TaskID
+	}
+	if err != nil {
 		ev.ErrorDetail = "grant verification refused: " + err.Error()
 		// Passed through rather than flattened. A missing grant and a wrong
 		// one are different things to a caller: the first has a next move and
@@ -894,28 +965,34 @@ func (c *Core) checkAvailability(t ToolDef, ev *ledger.Event) error {
 // any form — see transport/nats.Transport.Invoke's own comment on headers carrying
 // assertions, never credentials).
 //
-// causation_id is also left unset — empty because this build has no front
-// door that threads in the immediate parent call's own id (the LLM
-// generation that decided to call this tool, in design spec §4.2's
-// diagram), not because it was forgotten. Core.Invoke's own signature has
-// nothing to carry it from today; setting it requires a decision about
-// THAT signature, which is not this function's to make.
+// causation_id is left unset — empty because this build has no front door
+// that threads in the immediate parent call's own id (the LLM generation
+// that decided to call this tool, in design spec §4.2's diagram), not
+// because it was forgotten. Core.Invoke's own signature has nothing to
+// carry it from today.
 //
-// call_id, the deadline and trace context are deliberately NOT set here:
-// those are per-HOP, minted by whichever resolver actually crosses the
-// wire (the transport mints its own), not per-INVOKE. A resolver that
-// finds an InvocationContext already on ctx must fill those in itself
-// rather than trust ones set this far upstream, or two resolvers reusing
-// one ctx.Value(...) instance across retries would collide on one call_id.
-func (c *Core) withInvocationContext(ctx context.Context, p *Principal) context.Context {
+// call_id IS set here, to the ledger event id of this call, and it is the
+// one identifier that must be the same on both sides: a caller joining its
+// step record to the ledger row has only this. A resolver minting its own
+// per-hop id instead would produce a call_id that appears in no ledger row.
+// A resolver that crosses the wire fills in what is genuinely per-HOP — the
+// deadline it is actually enforcing, trace context — over the top of what it
+// finds, on a CLONE, because this value is shared with every hop.
+//
+// act carries the delegation chain minus the subject, so a tool — or a runner
+// performing a token exchange on the caller's behalf — sees that the call was
+// delegated and by whom. Omitting it would make a delegated call look direct
+// to everything on the far side of the hop, and an exchange performed on that
+// reading would mint for the subject alone: a widening, arrived at by
+// silence.
+func (c *Core) withInvocationContext(
+	ctx context.Context, p *Principal, callID string,
+) context.Context {
 	// Prefer a correlation_id already on ctx: nothing upstream sets one
 	// today, so this is inert in this build, but the day a front door
 	// decodes an inbound callctx.Header (a delegated call, say) and puts it
 	// on ctx before calling Invoke, overwriting it here would silently
-	// sever that caller's own trace — the same reasoning
-	// the transport already applies to the rest of the message when it
-	// clones an existing InvocationContext instead of building from
-	// nothing.
+	// sever that caller's own trace.
 	correlationID := newCorrelationID()
 	if existing := callctx.FromContext(ctx).GetAttribution().GetCorrelationId(); existing != "" {
 		correlationID = existing
@@ -929,6 +1006,17 @@ func (c *Core) withInvocationContext(ctx context.Context, p *Principal) context.
 			Subject: p.Subject,
 			Kind:    p.Kind,
 		},
+		CallId: callID,
+	}
+	// Chain is [subject, actor, actor, …] — the fold's own order — so act is
+	// everything after the subject. Kind is not carried per hop: Principal
+	// holds one, for the subject, and inventing a kind for an actor would be
+	// an assertion nothing verified.
+	if len(p.Chain) > 1 {
+		ic.Act = make([]*toolv1.Act, 0, len(p.Chain)-1)
+		for _, subject := range p.Chain[1:] {
+			ic.Act = append(ic.Act, &toolv1.Act{Subject: subject})
+		}
 	}
 	return callctx.NewContext(ctx, ic)
 }
@@ -1005,9 +1093,30 @@ func (c *Core) fgaPost(
 	return out, nil
 }
 
+// cardsIn reports whether a garm.card.v1.Card is reachable from md.
+//
+// Memoised on the descriptor, exactly as the plan is, so the answer is
+// computed once per catalogue generation and the WALK is what happens per
+// call (design §3.2). A descriptor this Core never mounted is computed rather
+// than answered false: a response type that arrived by some other route must
+// not skip the card walk simply because nobody pre-registered it.
+func (c *Core) cardsIn(md protoreflect.MessageDescriptor) bool {
+	c.mu.RLock()
+	has, known := c.cards[md]
+	c.mu.RUnlock()
+	if known {
+		return has
+	}
+	has = containsCard(md)
+	c.mu.Lock()
+	c.cards[md] = has
+	c.mu.Unlock()
+	return has
+}
+
 // sanitize is step 8: apply the resolved plan to the response.
 func (c *Core) sanitize(
-	ctx context.Context, p *Principal, resp proto.Message, ev *ledger.Event,
+	ctx context.Context, p *Principal, tool ToolDef, resp proto.Message, ev *ledger.Event,
 ) error {
 	// Amendment: the plan is looked up by the LIVE response descriptor —
 	// ProtoReflect().Descriptor() on the actual object the resolver returned
@@ -1032,6 +1141,33 @@ func (c *Core) sanitize(
 	// instead of with this one caller. resolved is derived from resp's own
 	// live descriptor five lines up, so the pairing holds by construction.
 	paths := policy.Sanitize(resp, resolved, redact.Ctx{Key: c.hashKey, Tenant: p.Tenant})
+
+	// The second half of step 8, for the one type garmd knows by name
+	// (cards-and-tasks design §3). It runs AFTER the field plan, over what
+	// the field plan left: a card the response's own field policy already
+	// dropped is not there to project.
+	if c.cardsIn(resp.ProtoReflect().Descriptor()) {
+		res := c.projectCards(p, tool, resp)
+		switch {
+		case res.invalid != "":
+			// Floor 1. The whole card, never a partial one: an element
+			// labelled below the endpoint's own policy means the card was
+			// built against a policy nobody checked, and serving the rest of
+			// it would be trusting the labels that happen to look right.
+			ev.Outcome = ledger.OutcomeError
+			ev.ErrorKind = ErrorKindCardInvalid
+			ev.ErrorDetail = ErrorKindCardInvalid + ": " + res.invalid
+			return errInternal
+		case res.gone:
+			// The viewer does not reach the card's own label. NotFound, the
+			// same closed answer step 2 gives for a tool they may not see,
+			// and for the same reason.
+			ev.ErrorDetail = "card withheld whole: the caller does not reach its access label"
+			return errNotFound
+		}
+		paths = append(paths, res.withheld...)
+	}
+
 	setRedactions(ctx, Redactions{Paths: paths, PlanHash: resolved.Hash})
 
 	// Ledger attribution (tools spec §9). Paths and the plan hash only — a

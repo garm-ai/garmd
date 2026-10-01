@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
-	"github.com/garm-ai/garm/contracts/wire"
+	"github.com/garm-ai/contracts/callctx"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/wire"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
@@ -162,6 +165,15 @@ func TestAnErrorHeaderIsAnErrorHoweverWellFormedTheBody(t *testing.T) {
 			t.Errorf("the error omits %q, which is what the handler said: %v", want, err)
 		}
 	}
+	// Typed, so the chain can tell a tool's answer from a broken hop: the
+	// code and the message as the tool put them on the headers.
+	var coded *transport.CodedError
+	if !errors.As(err, &coded) {
+		t.Fatalf("a micro error is not a transport.CodedError: %T %v", err, err)
+	}
+	if coded.Code != "500" || coded.Message != "the account does not exist" {
+		t.Errorf("coded = %+v, want code 500 and the handler's message", coded)
+	}
 	if out.GetValue() != "" {
 		t.Error("the body of a failed reply was unmarshalled into the response")
 	}
@@ -227,25 +239,57 @@ func TestTheDeadlineComesFromTheCallersContext(t *testing.T) {
 	}
 }
 
-// infoReply subscribes a fake service to the discovery subject. Raw JSON
-// rather than micro.AddService so that a test can also send a reply that is
-// not valid JSON at all, which AddService cannot be made to do.
-func infoReply(t *testing.T, nc *nats.Conn, payload []byte) {
+// fakeService answers discovery the way a micro service does: $SRV.PING
+// plane-wide, so the enumeration finds it, and $SRV.INFO.<name> for itself.
+//
+// Raw JSON rather than micro.AddService so that a test can also send a reply
+// that is not valid JSON at all, which AddService cannot be made to do — and
+// so that a test can leave one of the two verbs UNANSWERED, which is how the
+// incomplete-round rule is exercised without having to provoke a real drop.
+//
+// answerInfo false makes an instance that the enumeration counts and the
+// per-service round never hears from: the shape of a lost reply, produced on
+// purpose.
+func fakeService(t *testing.T, nc *nats.Conn, name, id string, info []byte, answerInfo bool) {
 	t.Helper()
-	subject, err := micro.ControlSubject(micro.InfoVerb, "", "")
+	subscribe := func(subject string, payload []byte) {
+		sub, err := nc.Subscribe(subject, func(m *nats.Msg) {
+			_ = nc.Publish(m.Reply, payload)
+		})
+		if err != nil {
+			t.Fatalf("subscribing a fake service to %s: %v", subject, err)
+		}
+		t.Cleanup(func() { _ = sub.Unsubscribe() })
+	}
+
+	ping, err := micro.ControlSubject(micro.PingVerb, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub, err := nc.Subscribe(subject, func(m *nats.Msg) {
-		_ = nc.Publish(m.Reply, payload)
-	})
-	if err != nil {
-		t.Fatalf("subscribing a fake service to discovery: %v", err)
+	subscribe(ping, pingJSON(t, name, id))
+
+	if answerInfo {
+		byName, err := micro.ControlSubject(micro.InfoVerb, name, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		subscribe(byName, info)
 	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	if err := nc.Flush(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func pingJSON(t *testing.T, name, id string) []byte {
+	t.Helper()
+	b, err := json.Marshal(micro.Ping{
+		ServiceIdentity: micro.ServiceIdentity{Name: name, ID: id, Version: "1.0.0"},
+		Type:            micro.PingResponseType,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func infoJSON(t *testing.T, info micro.Info) []byte {
@@ -259,7 +303,7 @@ func infoJSON(t *testing.T, info micro.Info) []byte {
 
 func TestServicesReportsWhatEachInstanceSaysAboutItself(t *testing.T) {
 	nc := connect(t)
-	infoReply(t, nc, infoJSON(t, micro.Info{
+	fakeService(t, nc, "t_v1_S", "instance-1", infoJSON(t, micro.Info{
 		ServiceIdentity: micro.ServiceIdentity{
 			Name:     "t_v1_S",
 			ID:       "instance-1",
@@ -267,17 +311,21 @@ func TestServicesReportsWhatEachInstanceSaysAboutItself(t *testing.T) {
 			Metadata: map[string]string{"garm.identity": "sha256:abc"},
 		},
 		Endpoints: []micro.EndpointInfo{{Name: "get", Subject: wire.Subject(procedure)}},
-	}))
+	}), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	tr := natstransport.New(nc)
-	tr.DiscoverWait = 200 * time.Millisecond
-	got, err := tr.Services(ctx)
+	tr.DiscoverWait = 2 * time.Second
+	round, err := tr.Services(ctx)
 	if err != nil {
 		t.Fatalf("Services: %v", err)
 	}
+	if !round.ConcludesAbsence() || !round.Complete("t_v1_S") {
+		t.Fatalf("a round that heard everything reported itself incomplete: %+v", round)
+	}
+	got := round.Services
 	if len(got) != 1 {
 		t.Fatalf("got %d services, want 1: %+v", len(got), got)
 	}
@@ -305,23 +353,33 @@ func TestServicesReportsWhatEachInstanceSaysAboutItself(t *testing.T) {
 // replies would quarantine tools that are perfectly healthy.
 func TestOneMalformedDiscoveryReplyDoesNotHideTheRest(t *testing.T) {
 	nc := connect(t)
-	infoReply(t, nc, []byte("this is not JSON"))
-	infoReply(t, nc, infoJSON(t, micro.Info{
+	fakeService(t, nc, "rubbish", "i1", []byte("this is not JSON"), true)
+	fakeService(t, nc, "healthy", "i2", infoJSON(t, micro.Info{
 		ServiceIdentity: micro.ServiceIdentity{Name: "healthy", ID: "i2"},
 		Endpoints:       []micro.EndpointInfo{{Subject: wire.Subject(procedure)}},
-	}))
+	}), true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	tr := natstransport.New(nc)
-	tr.DiscoverWait = 300 * time.Millisecond
-	got, err := tr.Services(ctx)
+	round, err := tr.Services(ctx)
 	if err != nil {
 		t.Fatalf("Services: %v", err)
 	}
+	got := round.Services
 	if len(got) != 1 || got[0].Name != "healthy" {
 		t.Fatalf("got %+v, want only the service that answered properly", got)
+	}
+	// And the one that answered rubbish is reported as a service that was
+	// not heard, rather than quietly forgotten: it answered the enumeration,
+	// so something IS running under that name, and a round that cannot say
+	// what must not let a caller conclude it is gone.
+	if round.Complete("rubbish") {
+		t.Error("a service whose reply could not be read was reported as heard in full")
+	}
+	if !errors.Is(round.Partial["rubbish"], transport.ErrIncompleteRound) {
+		t.Errorf("Partial[rubbish] = %v, want an ErrIncompleteRound", round.Partial["rubbish"])
 	}
 }
 
@@ -336,12 +394,20 @@ func TestDiscoveringNothingIsNotAnError(t *testing.T) {
 
 	tr := natstransport.New(nc)
 	tr.DiscoverWait = 100 * time.Millisecond
-	got, err := tr.Services(ctx)
+	round, err := tr.Services(ctx)
 	if err != nil {
 		t.Fatalf("Services with nothing running: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("got %+v, want nothing", got)
+	if len(round.Services) != 0 {
+		t.Errorf("got %+v, want nothing", round.Services)
+	}
+	// And it is a VERDICT, not a shrug: an empty plane that answered its
+	// whole window is evidence about what is not running, which is what lets
+	// the reconciler clear a stale quarantine. The blind spot this leaves —
+	// a plane that is merely unreachable looks identical — is in
+	// KNOWN-GAPS.md.
+	if !round.ConcludesAbsence() {
+		t.Error("an empty plane was reported as a round that heard too little to judge")
 	}
 }
 
@@ -418,4 +484,306 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// What crosses the hop beside the request.
+//
+// A fake service decodes the header the way tool-go does, so this asserts the
+// bytes on the wire rather than this package's opinion of them. Assertions,
+// never credentials: the caller's token does not appear here in any form.
+func TestTheInvocationContextCrossesTheHopOnItsHeader(t *testing.T) {
+	nc := connect(t)
+
+	// Built before subscribing: the reply function runs on nats.go's own
+	// goroutine, where a t.Fatalf would be a test-framework misuse rather
+	// than a failure anybody can read.
+	reply := marshalled(t, wrapperspb.String("pong"))
+	got := make(chan *toolv1.InvocationContext, 1)
+	bad := make(chan error, 1)
+	serveTool(t, nc, func(m *nats.Msg) *nats.Msg {
+		ic, err := callctx.Decode(m.Header.Get(callctx.Header))
+		if err != nil {
+			bad <- err
+		} else {
+			got <- ic
+		}
+		return &nats.Msg{Data: reply}
+	})
+
+	deadline := time.Now().Add(9 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	ctx = callctx.NewContext(ctx, &toolv1.InvocationContext{
+		CallId: "ev-1",
+		Attribution: &toolv1.CallContext{
+			Tenant:        "acme",
+			CorrelationId: "corr-1",
+		},
+		Principal: &toolv1.InvocationPrincipal{
+			Subject: "employee:jdoe",
+			Kind:    toolv1.PrincipalKind_PRINCIPAL_KIND_USER,
+		},
+		Act: []*toolv1.Act{{
+			Subject: "agent:support-assistant",
+			Kind:    toolv1.PrincipalKind_PRINCIPAL_KIND_AGENT,
+		}},
+	})
+
+	var out wrapperspb.StringValue
+	if err := natstransport.New(nc).Invoke(ctx, procedure, wrapperspb.String("ping"), &out); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+
+	select {
+	case err := <-bad:
+		t.Fatalf("the service could not decode the header: %v", err)
+	case ic := <-got:
+		if ic.GetCallId() != "ev-1" {
+			t.Errorf("call_id = %q, want ev-1: the ledger row and the hop must "+
+				"carry the same id or they cannot be joined", ic.GetCallId())
+		}
+		if ic.GetPrincipal().GetSubject() != "employee:jdoe" {
+			t.Errorf("subject = %q, want employee:jdoe", ic.GetPrincipal().GetSubject())
+		}
+		if ic.GetPrincipal().GetKind() != toolv1.PrincipalKind_PRINCIPAL_KIND_USER {
+			t.Errorf("kind = %v, want USER", ic.GetPrincipal().GetKind())
+		}
+		if len(ic.GetAct()) != 1 || ic.GetAct()[0].GetSubject() != "agent:support-assistant" {
+			t.Errorf("act = %v; a delegated call reached the service looking direct, "+
+				"and whatever exchanges on it would mint for the wrong chain", ic.GetAct())
+		}
+		if ic.GetAttribution().GetTenant() != "acme" {
+			t.Errorf("tenant = %q, want acme", ic.GetAttribution().GetTenant())
+		}
+		if d := ic.GetDeadline(); d == nil {
+			t.Error("no deadline on the hop; a relative one would restart here and a " +
+				"chain of hops would outlive what the caller allowed")
+		} else if diff := d.AsTime().Sub(deadline); diff > time.Second || diff < -time.Second {
+			t.Errorf("deadline = %s, want %s", d.AsTime(), deadline)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the service was called but reported no header")
+	}
+}
+
+// A caller with no context on ctx is an in-process one — a test, a direct
+// probe — and the header still has to be well formed, because the other side
+// refuses a request without one. A minted call_id is honest about what it is:
+// this hop's identifier, and no claim about a principal.
+func TestAHopWithNoUpstreamContextStillCarriesAUsableHeader(t *testing.T) {
+	nc := connect(t)
+
+	reply := marshalled(t, wrapperspb.String("pong"))
+	got := make(chan string, 1)
+	serveTool(t, nc, func(m *nats.Msg) *nats.Msg {
+		got <- m.Header.Get(callctx.Header)
+		return &nats.Msg{Data: reply}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out wrapperspb.StringValue
+	if err := natstransport.New(nc).Invoke(ctx, procedure, wrapperspb.String("ping"), &out); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+
+	raw := <-got
+	if raw == "" {
+		t.Fatal("no Garm-Invocation header; the far side refuses a request without one")
+	}
+	ic, err := callctx.Decode(raw)
+	if err != nil {
+		t.Fatalf("the header does not decode: %v", err)
+	}
+	if ic.GetCallId() == "" {
+		t.Error("call_id is empty, which callctx.Decode refuses by design")
+	}
+	if ic.GetPrincipal().GetSubject() != "" {
+		t.Errorf("subject = %q was invented for a call that asserted nobody",
+			ic.GetPrincipal().GetSubject())
+	}
+}
+
+// The context on ctx is shared with every hop this call makes. Mutating it
+// would let two resolvers collide on one call_id, so each hop clones.
+func TestTheHopDoesNotMutateTheContextItWasGiven(t *testing.T) {
+	nc := connect(t)
+
+	reply := marshalled(t, wrapperspb.String("pong"))
+	serveTool(t, nc, func(*nats.Msg) *nats.Msg { return &nats.Msg{Data: reply} })
+
+	upstream := &toolv1.InvocationContext{
+		CallId:    "ev-1",
+		Principal: &toolv1.InvocationPrincipal{Subject: "employee:jdoe"},
+	}
+	ctx, cancel := context.WithTimeout(callctx.NewContext(context.Background(), upstream),
+		5*time.Second)
+	defer cancel()
+
+	var out wrapperspb.StringValue
+	if err := natstransport.New(nc).Invoke(ctx, procedure, wrapperspb.String("ping"), &out); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+
+	if upstream.GetDeadline() != nil {
+		t.Error("the hop wrote its own deadline into the context the chain owns")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The shape that broke discovery: many instances answering one round.
+// ---------------------------------------------------------------------------
+
+// A plane that has scaled out is discovered whole.
+//
+// This is the regression test for a fixed buffer. Discovery used to collect
+// replies through a ChanSubscribe into make(chan *nats.Msg, 64), and nats.go
+// DISCARDS a message when that channel is full rather than blocking — it
+// increments a counter, marks the subscription a slow consumer and tells the
+// reader nothing. Because the reader drained in a select loop, 64 was a burst
+// limit rather than a total, so whether a round overflowed came down to
+// goroutine scheduling: intermittent, and more likely the larger the plane,
+// which is exactly backwards. A discarded reply became a service reported
+// absent, and an absent service becomes "declared but no service is serving
+// it" at the door.
+//
+// Two hundred instances, well past that buffer, arriving as one burst. The
+// assertion is not "most of them": it is all of them, and a round that says
+// so.
+func TestAPlaneThatHasScaledOutIsDiscoveredWhole(t *testing.T) {
+	nc := connect(t)
+
+	const (
+		services         = 8
+		replicasEach     = 25
+		total            = services * replicasEach
+		theOldBufferSize = 64
+	)
+	if total <= theOldBufferSize {
+		t.Fatalf("this test is pointless below the old buffer of %d", theOldBufferSize)
+	}
+
+	for s := range services {
+		name := fmt.Sprintf("svc_%d", s)
+		for r := range replicasEach {
+			id := fmt.Sprintf("%s-instance-%d", name, r)
+			fakeService(t, nc, name, id, infoJSON(t, micro.Info{
+				ServiceIdentity: micro.ServiceIdentity{
+					Name: name, ID: id, Version: "1.0.0",
+					Metadata: map[string]string{"garm.identity": "sha256:" + name},
+				},
+				Endpoints: []micro.EndpointInfo{{Subject: name + ".Get"}},
+			}), true)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	round, err := natstransport.New(nc).Services(ctx)
+	if err != nil {
+		t.Fatalf("Services: %v", err)
+	}
+	if len(round.Services) != total {
+		t.Errorf("discovery heard %d of %d instances; a reply was lost",
+			len(round.Services), total)
+	}
+	if !round.ConcludesAbsence() {
+		t.Errorf("the enumeration was reported incomplete: %v", round.Enumeration)
+	}
+	if len(round.Partial) != 0 {
+		t.Errorf("services reported as heard only in part: %v", round.Partial)
+	}
+}
+
+// A service heard in the enumeration but not in its own round is NOT absent.
+//
+// This is the rule the whole redesign exists for. Discovery reports what
+// answered in time, so silence is ambiguous: a service that did not answer
+// may be stopped, or may simply not have been heard. Those are different
+// facts and a caller has to be able to tell them apart, because one of them
+// licenses lifting a quarantine and the other does not.
+//
+// The instance here answers the plane-wide enumeration and never answers its
+// own $SRV.INFO — the shape of a lost reply, produced deterministically
+// rather than by trying to provoke a real drop.
+func TestAServiceHeardOnlyInPartIsNotReportedAbsent(t *testing.T) {
+	nc := connect(t)
+
+	answering := infoJSON(t, micro.Info{
+		ServiceIdentity: micro.ServiceIdentity{Name: "loud", ID: "loud-1"},
+		Endpoints:       []micro.EndpointInfo{{Subject: wire.Subject(procedure)}},
+	})
+	fakeService(t, nc, "loud", "loud-1", answering, true)
+	fakeService(t, nc, "quiet", "quiet-1", nil, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tr := natstransport.New(nc)
+	tr.DiscoverWait = time.Second
+	round, err := tr.Services(ctx)
+	if err != nil {
+		t.Fatalf("Services: %v", err)
+	}
+
+	// The silent one contributes no Service — there is nothing to report
+	// about an instance that said nothing.
+	for _, svc := range round.Services {
+		if svc.Name == "quiet" {
+			t.Fatalf("the silent service produced a Service record: %+v", svc)
+		}
+	}
+	// But the round says it could not hear it, which is the whole point: a
+	// caller reading Services alone would conclude "quiet" is gone.
+	if round.Complete("quiet") {
+		t.Error("a service that never answered its own round was reported as heard in full")
+	}
+	if !errors.Is(round.Partial["quiet"], transport.ErrIncompleteRound) {
+		t.Errorf("Partial[quiet] = %v, want an ErrIncompleteRound", round.Partial["quiet"])
+	}
+	// And one service going unheard says nothing about its neighbour. This
+	// is what per-service rounds buy: under a single plane-wide collection,
+	// a noisy service could crowd out a quiet one's reply and the two were
+	// indistinguishable.
+	if !round.Complete("loud") {
+		t.Errorf("a healthy service was tainted by its neighbour: %v", round.Partial["loud"])
+	}
+}
+
+// A round stops when the replies stop, rather than always paying the ceiling.
+//
+// The old collection had one termination condition — the window — so every
+// reconciliation sweep waited it out even when the whole plane had answered
+// in three milliseconds. The stall timer makes the common case cost what the
+// plane costs.
+func TestAQuietPlaneEndsTheRoundEarly(t *testing.T) {
+	nc := connect(t)
+	fakeService(t, nc, "prompt", "i1", infoJSON(t, micro.Info{
+		ServiceIdentity: micro.ServiceIdentity{Name: "prompt", ID: "i1"},
+		Endpoints:       []micro.EndpointInfo{{Subject: wire.Subject(procedure)}},
+	}), true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tr := natstransport.New(nc)
+	// A ceiling nobody should wait for.
+	tr.DiscoverWait = 10 * time.Second
+	tr.DiscoverStall = 50 * time.Millisecond
+
+	start := time.Now()
+	round, err := tr.Services(ctx)
+	if err != nil {
+		t.Fatalf("Services: %v", err)
+	}
+	if len(round.Services) != 1 {
+		t.Fatalf("got %+v, want the one service", round.Services)
+	}
+	// Generous — two rounds of stall plus scheduling — and still two orders
+	// of magnitude under the ceiling, which is the property under test.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("the round took %v; it waited out the ceiling rather than the stall", elapsed)
+	}
 }

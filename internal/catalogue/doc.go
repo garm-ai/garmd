@@ -13,7 +13,7 @@
 //     rather than what it was handed.
 //
 //   - Identity is the pair (binary version, catalogue digest), reported at
-//     startup, on the health endpoint and on every ledger event. That pair is
+//     startup and on every ledger event. That pair is
 //     what replaces "the catalogue is the version" now that the catalogue is
 //     not compiled in.
 //

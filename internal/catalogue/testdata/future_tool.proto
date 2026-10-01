@@ -1,0 +1,311 @@
+// ===========================================================================
+// A FIXTURE: `garm/tool/v1/tool.proto` FROM THE FUTURE.
+//
+// Identical to the contract this binary links, with one difference —
+// `ToolPolicy.audience` is field 40 rather than 14. Nothing ships it; it
+// exists to hold one property that would otherwise rot the moment garm and
+// garmd agreed:
+//
+//   internal/catalogue/audience.go finds the field by NAME in the
+//   CATALOGUE's own descriptors and reads its value out of the annotation's
+//   unknown bytes, so a catalogue built against a tool.proto this binary is
+//   older than is still read correctly.
+//
+// That is the mechanism that let Track D ship before garm v0.17.0 existed,
+// and it is the mechanism that will let the next field ship the same way. A
+// test against the LINKED contract alone cannot exercise it, because there
+// the field resolves and the unknown-bytes path is never taken.
+// ===========================================================================
+
+// Annotation vocabulary for the tools server (tools spec §3).
+syntax = "proto3";
+
+package garm.tool.v1;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/garm-ai/contracts/garm/tool/v1;toolv1";
+
+// ---------------------------------------------------------------- classification
+
+// The enum number is the ordinal. Values are spaced by ten so a level can be
+// inserted later; existing values must never be renumbered.
+enum Clearance {
+  CLEARANCE_UNSPECIFIED  = 0;   // never a valid caller or field value
+  CLEARANCE_PUBLIC       = 10;
+  CLEARANCE_INTERNAL     = 20;
+  CLEARANCE_CONFIDENTIAL = 30;
+  CLEARANCE_RESTRICTED   = 40;
+}
+
+enum Verb {
+  VERB_UNSPECIFIED = 0;
+  VERB_READ        = 1;
+  VERB_WRITE       = 2;
+  VERB_DESTRUCTIVE = 3;
+}
+
+// PrincipalKind says WHAT is calling, not what it may do.
+//
+// It is attribution, never authorization. Nothing in the chain reads it: the
+// ten steps decide on clearance, compartments, verbs and tool sets, and
+// adding a fifth vocabulary that can deny a call would mean two places to
+// look when a call is refused. It exists because "which of these ledger rows
+// were agents" is a question people ask constantly and cannot currently
+// answer, and because the tool on the far side of the resolver is entitled
+// to know whether a human is waiting on it.
+//
+// If gating on kind is ever wanted, it belongs in a declared field on
+// ToolPolicy — reviewed like any other governance — not in an ad-hoc check.
+enum PrincipalKind {
+  PRINCIPAL_KIND_UNSPECIFIED = 0;  // a token that did not say; attribution only, never a denial
+  PRINCIPAL_KIND_USER        = 1;  // a person
+  PRINCIPAL_KIND_AGENT       = 2;  // an autonomous loop acting for someone
+  PRINCIPAL_KIND_SERVICE     = 3;  // a system calling on its own behalf
+}
+
+// Audience says WHO a tool is for: a model, a person, or the platform's
+// runner. It is the tool's own answer to a question a tool SET cannot
+// answer.
+//
+// A set says who HOLDS a tool — `payments`, `support` — and that is a
+// different question from what the tool is for. `get_balance` and
+// `screen_party` are tools a person's claims may well reach, and neither
+// should ever appear as a form in a person's client: they are what an agent
+// calls, not what a person fills in. So the tool declares it, in its own
+// contract, where it is reviewed with everything else about the tool.
+//
+// The rule is an AND, and neither half is new: a tool is offered to a viewer
+// when its audience admits that viewer's kind AND the viewer's folded claims
+// reach it (the visibility step, unchanged). ListTools takes the audience it
+// is asking for and defaults to AGENT, which is what makes a model's list
+// unchanged by this field existing.
+//
+//   a person's client  sees PERSON tools the person's claims reach
+//   a run's model      sees AGENT tools the run's folded authority reaches,
+//                      minus what the manifest's allowlist drops
+//   the runner itself  sees RUNNER tools, called from the workflow and never
+//                      from the loop
+//
+// Who may INVOKE an agent, as against see it, is still the authorization
+// graph's business and is checked at the exchange, after visibility.
+enum Audience {
+  AUDIENCE_UNSPECIFIED = 0;   // read as AGENT: person-facing is always an explicit choice
+  AUDIENCE_AGENT       = 1;   // a model may be offered it; a person's client never lists it
+  AUDIENCE_PERSON      = 2;   // a person's client may offer it; a model only if AGENT is also declared
+  AUDIENCE_RUNNER      = 3;   // only the platform's runner: create_task, and later the artefact stamps
+}
+
+enum Reversibility {
+  REVERSIBILITY_UNSPECIFIED = 0;  // fails closed to NONE
+  REVERSIBILITY_NONE        = 1;
+  REVERSIBILITY_COMPENSABLE = 2;
+  REVERSIBILITY_FULL        = 3;
+}
+
+enum Grain {
+  GRAIN_UNSPECIFIED = 0;
+  GRAIN_DAY         = 1;
+  GRAIN_MONTH       = 2;
+  GRAIN_YEAR        = 3;
+}
+
+// ---------------------------------------------------------------- redaction
+
+message Omit         {}
+message Mask         { string with = 1; }          // default "[REDACTED]"
+message Hash         { bool per_tenant_salt = 1; }
+message EmailDomain  {}
+message KeepLast     { uint32 n = 1; bool runes = 2; string reason = 3; }
+message Truncate     { uint32 n = 1; bool runes = 2; string reason = 3; }
+message CardBinLast4 {}
+message IpPrefix     { uint32 bits = 1; }
+message UrlOrigin    {}
+message DateGrain    { Grain grain = 1; }
+message Custom       { string name = 1; }
+
+message Redaction {
+  oneof kind {
+    Omit         omit           = 1;
+    Mask         mask           = 2;
+    Hash         hash           = 3;
+    EmailDomain  email_domain   = 4;
+    KeepLast     keep_last      = 5;
+    Truncate     truncate       = 6;
+    CardBinLast4 card_bin_last4 = 7;
+    IpPrefix     ip_prefix      = 8;
+    UrlOrigin    url_origin     = 9;
+    DateGrain    date_grain     = 10;
+    Custom       custom         = 15;
+  }
+}
+
+// ---------------------------------------------------------------- field policy
+
+message FieldPolicy {
+  // Source says WHO supplies a request field's value.
+  //
+  // The default, SOURCE_UNSPECIFIED, is the caller: the field is part of the
+  // request as the contract exposes it. SOURCE_RUNNER says the value is the
+  // runner's — the thing that dispatches the call on a principal's behalf —
+  // and never a model's or a direct caller's.
+  //
+  // What each side does with it:
+  //
+  //   garmd projects a SOURCE_RUNNER field out of the schema ListTools hands
+  //   to any caller (it is not the caller's to fill) and refuses a request
+  //   that sets one unless the call's Garm-Invocation carries an `exec`
+  //   runner identity. That half is garmd v0.2.2; a daemon older than that
+  //   ignores the field entirely, which is why adding it did not move the
+  //   annotation schema version — see AnnotationSchemaVersion in embed.go.
+  //
+  //   agentd strips every SOURCE_RUNNER field from the schema a model sees
+  //   and fills each by rule at dispatch. The one rule this release knows:
+  //   a field named `idempotency_key` is filled with `<run_id>-<dispatch
+  //   seq>` — identical on the granted retry, distinct for a second call in
+  //   the same run. Lint L34 refuses a SOURCE_RUNNER field with any other
+  //   name, because a runner field with no rule is a request nobody can
+  //   send.
+  //
+  // Why a runner supplies an idempotency key and a model never does: a model
+  // that retries after a timeout it never saw the answer to picks a new key
+  // and pays twice, or reuses one for two different payments and pays once.
+  // The key must come from the thing that knows what a retry is.
+  enum Source {
+    SOURCE_UNSPECIFIED = 0;  // the caller's to fill
+    SOURCE_RUNNER      = 1;  // filled by the dispatching runner; refused from anyone else
+  }
+
+  Clearance read  = 1;
+  Clearance write = 2;               // unset = same as read
+  repeated string compartments = 3;
+  Redaction on_deny = 4;             // unset = omit
+  bool audit_on_read = 5;
+
+  // Meaningful on a field of a tool's REQUEST message only. On a message's
+  // default_field_policy it is refused by L34: a default applies to every
+  // field, and "every field is the runner's" is never what anyone meant.
+  Source source = 6;
+}
+
+// ---------------------------------------------------------------- tool policy
+
+message Effects {
+  bool idempotent = 1;
+  Reversibility reversibility = 2;
+  bool external = 3;
+  string compensating_tool = 4;
+}
+
+message Approval {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_NONE   = 1;
+    MODE_NOTIFY = 2;
+    MODE_GRANT  = 3;
+  }
+  Mode mode = 1;
+  Clearance approver_min_clearance = 2;
+  repeated string approver_compartments = 3;
+  uint32 max_grant_age_seconds = 4;
+  string notes = 5;
+
+  // material_fields names what a human is actually approving.
+  //
+  // Without it a grant binds only (tool, subject, time), so a fifteen-minute
+  // approval authorises any call to that tool in the window — approve ten
+  // pounds, send ten thousand. With it, the grant carries a digest over these
+  // fields' values and garmd refuses a request that does not match: the human
+  // approved THIS payment, not a payment.
+  //
+  // Each entry is a dotted path to a SCALAR leaf — string, number, bool or
+  // enum — of the request message. A path naming a message, a repeated field
+  // or a map is refused at build time, and not because those are hard: a
+  // digest over them would need a canonical protobuf encoding agreed by every
+  // language that computes or checks a grant, and a field a human cannot read
+  // in a sentence is one they cannot meaningfully approve.
+  //
+  // Absence is a value, not an omission. An unset field digests as `<unset>`,
+  // distinct from empty and from zero, so approving a request with an amount
+  // and sending one without is a mismatch — while a field whose ABSENCE is
+  // material, like an unset schedule date meaning "now", still works.
+  repeated string material_fields = 6;
+}
+
+message Example { string description = 1; string request_json = 2; }
+
+message Guidance {
+  string when_to_use = 1;
+  string when_not_to_use = 2;
+  repeated Example examples = 3;
+  string on_error = 4;
+}
+
+message ListFilter { string repeated_field = 1; string id_field = 2; }
+
+message Fga {
+  string relation = 1;
+  string object_type = 2;
+  oneof object {
+    string     from_request_field  = 3;
+    string     from_response_field = 4;
+    ListFilter filter_response     = 5;
+  }
+}
+
+message Authorization { oneof backend { Fga fga = 1; } }
+
+message Audit {
+  enum Level {
+    LEVEL_UNSPECIFIED = 0;           // = LEVEL_LEDGER
+    LEVEL_LEDGER      = 1;
+    LEVEL_AUDIT       = 2;
+  }
+  Level level = 1;
+  bool record_request  = 2;
+  bool record_response = 3;
+  uint32 retain_days   = 4;
+  bool fail_closed     = 5;
+}
+
+message ToolPolicy {
+  string name = 1;
+  string title = 2;
+  string description = 3;
+  Verb verb = 4;
+  Clearance min_clearance = 5;
+  repeated string compartments = 6;
+  bool exclude = 7;
+
+  Effects       effects       = 8;
+  Approval      approval      = 9;
+  Guidance      guidance      = 10;
+  Authorization authorization = 11;
+  repeated string sets = 12;
+  Audit         audit         = 13;
+
+  // Who this tool is for. EMPTY MEANS [AUDIENCE_AGENT] — see Audience —
+  // so every tool declared before this field existed keeps exactly the
+  // audience it had, and person-facing is never something a tool falls
+  // into by omission.
+  //
+  // Repeated because the two real audiences overlap: an agent's Invoke is
+  // [PERSON, AGENT] (a person starts a run; another agent may delegate one),
+  // while initiate_payment is [AGENT] and its approval card is [PERSON].
+  // RUNNER does not overlap with either: a tool the runner fills in is not
+  // one a model or a person may call at all.
+  repeated Audience audience = 40;   // 14 in the shipped contract; see the header
+}
+
+// ---------------------------------------------------------------- declarations
+
+message Decl { string name = 1; string description = 2; }
+message DeclSet { repeated Decl declared = 1; }
+
+// ---------------------------------------------------------------- extensions
+
+extend google.protobuf.FieldOptions   { FieldPolicy field_policy = 50001; }
+extend google.protobuf.MethodOptions  { ToolPolicy  tool = 50002; }
+extend google.protobuf.MessageOptions { FieldPolicy default_field_policy = 50003; }
+extend google.protobuf.FileOptions    { DeclSet compartments = 50004; }
+extend google.protobuf.FileOptions    { DeclSet tool_sets = 50005; }

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/garm-ai/garmd/internal/tool"
@@ -212,6 +212,7 @@ func sameDeclarationAs(t, o ToolDef) bool {
 		t.MinClearance == o.MinClearance &&
 		slices.Equal(t.Compartments, o.Compartments) &&
 		slices.Equal(t.Sets, o.Sets) &&
+		slices.Equal(t.Audience, o.Audience) &&
 		md(t.Input) == md(o.Input) &&
 		md(t.Output) == md(o.Output) &&
 		t.ApprovalMode == o.ApprovalMode &&
@@ -228,6 +229,7 @@ func sameDeclarationAs(t, o ToolDef) bool {
 		t.Idempotent == o.Idempotent &&
 		t.Reversibility == o.Reversibility &&
 		t.External == o.External &&
+		t.WhenToUse == o.WhenToUse &&
 		t.WhenNotToUse == o.WhenNotToUse &&
 		t.OnError == o.OnError &&
 		maps.Equal(t.FieldDocs, o.FieldDocs)

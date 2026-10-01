@@ -3,8 +3,8 @@ package toolplane
 import (
 	"fmt"
 
-	toolv1 "github.com/garm-ai/garm/contracts/garm/tool/v1"
-	"github.com/garm-ai/garm/policy"
+	toolv1 "github.com/garm-ai/contracts/garm/tool/v1"
+	"github.com/garm-ai/contracts/policy"
 )
 
 // ShapeRequest asks for a view as a LESSER principal.

@@ -41,31 +41,134 @@ jobs:
           install: true
           cache: true
 
-      # garmd must never depend on devkit, which mints tokens.
+      # garmd must never depend on a token minter — devkit or the STS.
       #
-      # devkit can assert any identity — any clearance, any compartment, any
+      # Either can assert any identity — any clearance, any compartment, any
       # delegation chain. This daemon decides what an identity may DO. The two
       # in one dependency graph means something in a request path can reach a
       # minter, and the reciprocal of this check lives in devkit's own CI.
+      #
+      # Both build configurations, with test imports, because a build tag
+      # hides an import from `go list` completely. conformance_test.go is
+      # //go:build conformance — the single file in this repository most
+      # likely to reach for a minter, and since the conformance job now
+      # drives the STS's own endpoints it is the file where an import would
+      # be most tempting — and an untagged list does not see it at all:
+      #
+      #   go list -f '{{.XTestGoFiles}}' ./internal/conformance/
+      #     [form_minter_test.go run_test.go suite_test.go]
+      #   go list -tags conformance -f '{{.XTestGoFiles}}' ./internal/conformance/
+      #     [conformance_test.go form_minter_test.go run_test.go suite_test.go]
+      #
+      # The constraint is "not in go.mod, not in a _test.go import, not
+      # behind a build tag", so the check runs once per tag set.
       - name: no dependency on the token minter
         run: |
-          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/devkit'; then
-            echo "garmd depends on devkit, which mints identities" >&2
-            exit 1
-          fi
-          echo "ok: garmd cannot reach a token minter"
+          for tags in "" "conformance"; do
+            # The assignment on its own line is the real protection here: a
+            # `go list` that fails inside an `if` condition is swallowed and
+            # reads as a clean check, where under errexit a failing
+            # assignment aborts the step. The empty-output guard below
+            # covers the remaining case — a `go list` that succeeds but
+            # prints nothing is broken, not clean.
+            deps=$(go list -tags "$tags" -deps -test ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/(devkit|sts)'; then
+              echo "::error::garmd has acquired a dependency on a token minter (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: no minter in the dependency graph, untagged or under -tags conformance"
 
       # garmd must never build-depend on a repository that implements tools.
       # A catalogue crosses that line as DATA, loaded at boot — never as an
       # import. This is the inversion the whole architecture buys: garmd's
       # build sees no tool protos at all.
+      #
+      # Same fail-closed shape as the minter check above, and for the same
+      # reason: a `go list` that fails inside an `if` condition is swallowed
+      # and reads as a clean check. Build deps only (no -test) because the
+      # constraint is on the BUILD — but under both tag sets, because a
+      # tagged non-test file is invisible to an untagged list.
       - name: no dependency on any tool repository
         run: |
-          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/(examples|tools|agent)'; then
-            echo "::error::garmd build-depends on a tool repository; a catalogue is data, not an import" >&2
-            exit 1
-          fi
-          echo "clean: garmd depends on no tool repository"
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/(examples|tools|agent)'; then
+              echo "::error::garmd build-depends on a tool repository; a catalogue is data, not an import (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: garmd depends on no tool repository, untagged or under -tags conformance"
+
+      # garmd does not know about agents. An agent's manifest is bytes it
+      # carries unread (see internal/catalogue/agentblind_test.go). The agent
+      # contracts live in the contract module this daemon DOES link, so the
+      # boundary above cannot see them; this one can, tests included.
+      #
+      # The path is github.com/garm-ai/contracts/garm/agent since the contract
+      # became its own module. It was garm/contracts/garm/agent while the
+      # contract was a directory inside the command line tool's repository,
+      # and a grep for a path nothing imports any more passes without
+      # asserting anything, which is worse than no check at all.
+      #
+      # Tests included (-test) and both tag sets, exactly as the minter check:
+      # the agent-blind tests are the files most tempted to import the
+      # contract they prove is never read, and conformance_test.go is behind
+      # a build tag an untagged list cannot see.
+      - name: no dependency on the agent contracts
+        run: |
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps -test ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/contracts/garm/agent'; then
+              echo "::error::garmd reaches the agent contracts; it must stay agent-blind (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: garmd is agent-blind, untagged or under -tags conformance"
+
+      # garmd knows the CARD as a type, by full name, and never as an import.
+      #
+      # Step 8 projects garm.card.v1.Card (internal/toolplane/sanitise.go) by
+      # matching the message's full name and reading `access` off the value
+      # through protoreflect. The package is
+      # github.com/garm-ai/contracts/garm/card since the contract became its
+      # own module; it was garm/contracts/garm/card before, and a grep for the
+      # old spelling would pass on a build that linked the new one.
+      # Linking the contract would be a different thing:
+      # a build-time dependency on a vocabulary this daemon is supposed to be
+      # able to meet as bytes, and the first step towards reading the rest of
+      # it — the kinds, the templates — because it would be there. The fixture
+      # at internal/toolplane/testdata/card.proto is what the assumption is
+      # pinned against instead.
+      #
+      # Tests included, because the card tests are precisely where importing
+      # the real type would be most tempting.
+      - name: no dependency on the card contracts
+        run: |
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps -test ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/contracts/garm/card'; then
+              echo "::error::garmd links the card contracts; it knows the type by NAME (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: garmd knows garm.card.v1.Card by name and links nothing of it"
 
       # The embedded NATS server is a TEST dependency and must stay one.
       #
@@ -75,40 +178,107 @@ jobs:
       # which is the point: a daemon that can start a broker is a daemon that
       # will, on someone's laptop, in production.
       #
-      # Storage clients are named here for the same reason. A durable audit
-      # store belongs behind a forwarder reading the stream, not inside the
-      # process deciding what a caller may do.
+      # Storage clients are named here because a durable audit store belongs
+      # behind a forwarder reading the stream, not inside the process deciding
+      # what a caller may do.
+      #
+      # The AWS S3 client is deliberately NOT in this list. It is in the build,
+      # and for the one thing the reasoning above does not cover: reading the
+      # catalogue. That is an artifact this process loads at boot and re-reads
+      # on an ETag change, with GetObject and HeadObject and nothing else —
+      # internal/catalogue/s3.go's S3API interface is two read methods wide, so
+      # a change that gave garmd the ability to WRITE to an object store would
+      # have to widen it in a diff someone reads.
+      #
+      # Deliberately WITHOUT -test: the whole point is that the broker is a
+      # test dependency, so a list that included test imports would fail on
+      # the exact arrangement this check exists to permit. Fail-closed shape
+      # and both tag sets as above.
       - name: the broker and the storage clients stay out of the build
         run: |
-          if go list -deps ./... 2>/dev/null | grep -E 'nats-server|go-duckdb|minio-go'; then
-            echo "::error::garmd build-depends on an embedded broker or a storage client" >&2
-            exit 1
-          fi
-          echo "clean: the embedded server is test-only and no storage client is linked"
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'nats-server|go-duckdb|minio-go'; then
+              echo "::error::garmd build-depends on an embedded broker or a storage client (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: the embedded server is test-only and no storage client is linked, untagged or under -tags conformance"
+
+      # garmd decides and records; it STORES nothing a tool could ask it for.
+      #
+      # This is a design rule, not a dependency policy, which is why the
+      # failure message says so. A daemon with a database acquires state that
+      # outlives a request, and the next question is always whether that state
+      # is authoritative — at which point the proxy has become a second source
+      # of truth about what happened, competing with the ledger it publishes.
+      # The tasks service holds tasks, the runner holds runs, and this process
+      # holds neither.
+      #
+      # Where the line is drawn, and why there. `database/sql` is the choke
+      # point: a driver that follows the idiom is unusable without it, so one
+      # stdlib path catches the whole conventional ecosystem including drivers
+      # nobody has written yet. The named modules are the ones that get there
+      # WITHOUT it — pgx's native interface, the ORMs that own their own
+      # connection handling, and the migration runners, which arrive on their
+      # own and are the likeliest first step. Matching the module prefix
+      # rather than a version means a major bump does not silently reopen it.
+      #
+      # Tests included (-test), unlike the broker check below: the embedded
+      # NATS server is a deliberate test dependency and a SQL driver would
+      # never be one — a test that needs a database is this daemon growing a
+      # database. Fail-closed shape and both tag sets as above.
+      - name: no database, no migrations
+        run: |
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps -test ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE '^database/sql|jackc/pgx|lib/pq|go-sql-driver/mysql|mattn/go-sqlite3|modernc.org/sqlite|microsoft/go-mssqldb|gorm.io|entgo.io|uptrace/bun|jmoiron/sqlx|golang-migrate|pressly/goose|rubenv/sql-migrate|amacneil/dbmate'; then
+              echo "::error::garmd has acquired a database (tags=\"$tags\"). This is a design rule, not a dependency policy: garmd decides and records, and stores nothing a tool could ask it for. State that outlives a request makes this proxy a second source of truth about what happened, competing with the ledger. The tasks service holds tasks, the runner holds runs, and this process holds neither." >&2
+              exit 1
+            fi
+          done
+          echo "ok: no SQL driver, ORM or migration tool in the graph, untagged or under -tags conformance"
 
       # The tool-side runtime is what a tool service imports. A daemon
       # importing it would have the dependency backwards, and would drag the
       # enforcing side into a consumer's graph the first time anyone reused
       # a type.
+      #
+      # Fail-closed shape and both tag sets as above; build deps only, since
+      # the boundary is about what the daemon links.
       - name: no dependency on the tool runtime
         run: |
-          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/tool-(go|python)'; then
-            echo "::error::garmd depends on the tool-side runtime; that inverts the boundary" >&2
-            exit 1
-          fi
-          echo "clean: garmd depends on no tool runtime"
+          for tags in "" "conformance"; do
+            deps=$(go list -tags "$tags" -deps ./...)
+            if [ -z "$deps" ]; then
+              echo "::error::go list (tags=\"$tags\") produced no dependency output at all; that is a broken check, not a clean one" >&2
+              exit 1
+            fi
+            if echo "$deps" | grep -qE 'garm-ai/tool-(go|python)'; then
+              echo "::error::garmd depends on the tool-side runtime; that inverts the boundary (tags=\"$tags\")" >&2
+              exit 1
+            fi
+          done
+          echo "ok: garmd depends on no tool runtime, untagged or under -tags conformance"
 
   conformance:
-    name: identity conformance (devkit)
+    name: identity conformance (sts)
     runs-on: ubuntu-latest
-    # Skipped on PRs from forks, and skipped deliberately. The `spec`
-    # checkout below needs a secret; a fork PR is handed none, so the job
-    # would run, substitute `github.token`, and fail the private checkout
-    # with a permissions error that reads like a bug in the contributor's
-    # change. A skipped job is honest about what was not checked. A
-    # permanently red one on every outside PR teaches people to ignore red
-    # CI, which costs more than this job is worth.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Runs everywhere, forks included. It used to be guarded, because the
+    # `sts` checkout below needed a secret and a fork PR is handed none —
+    # the job would substitute `github.token`, fail the private checkout, and
+    # report a permissions error that read like a bug in the contributor's
+    # change. garm-ai/sts is PUBLIC now, so there is no secret to be without
+    # and nothing left to guard against. The drift check this job performs is
+    # most valuable on exactly the PRs the guard used to skip.
     steps:
       - uses: actions/checkout@v5
         with:
@@ -121,6 +291,42 @@ jobs:
         with:
           repository: garm-ai/devkit
           path: devkit
+
+      # The service under test. Cloned and RUN, never required — the
+      # boundaries job's "no dependency on a minter" check greps for
+      # garm-ai/sts in `go list -deps -test` under both tag sets, so the
+      # only edge between these two repositories is a TCP connection.
+      #
+      # NO `token:`, because garm-ai/sts is public — the same reason the
+      # devkit checkout above has none. It carried
+      # `secrets.GARM_CI_TOKEN || github.token` from when sts was private,
+      # and that is what broke this job: the secret resolved to no usable
+      # credential, actions/checkout wrote an empty Authorization header
+      # rather than none, and git answered
+      #
+      #     fatal: could not read Username for 'https://github.com'
+      #
+      # on a repository anyone can clone anonymously. An empty credential is
+      # not the absence of one.
+      #
+      # The steps below read $GITHUB_WORKSPACE/sts/deploy/{claims,tuples}.yaml
+      # and build ./cmd/sts from this checkout: the conformance suite is
+      # pinned against the deployment fixtures sts actually ships, not
+      # against a copy of them kept here.
+      #
+      # PINNED TO A TAG, on purpose. The endpoints this suite drives —
+      # exchange 2's governed door, POST /approve — and the deploy fixtures
+      # it reads (can_run tuples, the approve: config block) first shipped in
+      # sts v0.3.0; an older sts refuses to start on the `approve:` block
+      # below, because its LoadConfig reads with KnownFields(true). Bump the
+      # tag deliberately when the suite grows a case that needs a newer sts:
+      # a branch ref would make this job follow whatever lands there, which
+      # is the opposite of what a drift check is for.
+      - uses: actions/checkout@v5
+        with:
+          repository: garm-ai/sts
+          ref: v0.3.0
+          path: sts
 
       # The suite for this job lives in this repository at
       # internal/conformance/suites/sts.json, alongside devkit's. Both moved
@@ -141,11 +347,12 @@ jobs:
           # child holds this step's log pipe open and the job hangs until
           # timeout instead of proceeding to the readiness poll below.
           #
-          # No --personas: the STS's exchange requires a subject_token
-          # carrying a `tenant` claim, and devkit's persona (?user=) form
-          # never attaches one. FormMinter's upstream fetch instead drives
-          # devkit's ad-hoc ?sub=&tenant= form, which does — see
-          # form_minter.go's doc comment on UpstreamURL.
+          # No --personas: this job runs the STS suite, whose cases name
+          # their subject, tenant and claims explicitly, so FormMinter drives
+          # devkit's ad-hoc ?sub=&tenant= form (see form_minter.go's doc
+          # comment on UpstreamURL). devkit's persona (?user=) form does
+          # attach the personas file's tenant since v0.1.0; the devkit suite
+          # uses it, and needs --personas with no --tenant.
           go run ./cmd/garmdev idp \
             --addr 127.0.0.1:7450 \
             --audience garm-customer-idp > /tmp/devkit-idp.log 2>&1 &
@@ -182,11 +389,19 @@ jobs:
               - kid: k1
                 pem: \$STS_SIGN_KEY_K1
           issuers:
-            - name: devkit-customer
+            # kind: employee, not customer. The approval endpoint refuses a
+            # non-employee approver by design (approval-grants §4, frame
+            # 12), the STS resolves kind from the ISSUER's configuration,
+            # and devkit serves one fixed \`iss\` — so one issuer entry can
+            # only ever have one kind, and the grant case needs it to be
+            # this one. The customer-side behaviour it displaced (the
+            # instanceAuthorization clearance cap) is pinned by sts's own
+            # TestInstanceAuthorizationAbsentRefusesCustomerTokens.
+            - name: devkit-employee
               iss: https://garmdev.invalid/idp
               jwks: http://127.0.0.1:7450/.well-known/jwks.json
               audience: [garm-customer-idp]
-              kind: customer
+              kind: employee
           clients:
             - id: conformance-client
               keys:
@@ -197,6 +412,11 @@ jobs:
           instanceAuthorization:
             status: absent
             unconfinedCeiling: PUBLIC
+          # POST /approve's grant lifetime. The suite's grant case declares
+          # a tool with max_grant_age_seconds 900, and the tool's own
+          # ceiling is the one that binds — this is only the floor.
+          approve:
+            ttl_seconds: 900
           EOF
           cat /tmp/sts-config.yaml
 

@@ -1,0 +1,64 @@
+// What a tool is FOR, declared (cards-and-tasks design §2.5), across the five
+// shapes the design names: an agent's tool, a person's card, the runner's own
+// call, an agent a person may also start, and a tool declared before
+// audiences existed.
+syntax = "proto3";
+package bank.payments.v1;
+option go_package = "example.com/gen/bank_payments_v1;x";
+
+import "garm/tool/v1/tool.proto";
+
+message Empty {
+  option (garm.tool.v1.default_field_policy) = { read: CLEARANCE_PUBLIC on_deny: { omit: {} } };
+  optional string id = 1;
+}
+
+service PaymentsService {
+  // What an agent calls and no person ever fills in a form for.
+  rpc GetBalance(Empty) returns (Empty) {
+    option (garm.tool.v1.tool) = {
+      name: "get_balance" title: "Read a balance" verb: VERB_READ
+      min_clearance: CLEARANCE_INTERNAL sets: ["payments"]
+      audience: [AUDIENCE_AGENT]
+    };
+  }
+
+  // A card. Person-facing by construction, whatever its parent is — which is
+  // why a model is never offered one: not a set it might be granted, an
+  // audience it is not.
+  rpc InitiatePaymentApprovalCard(Empty) returns (Empty) {
+    option (garm.tool.v1.tool) = {
+      name: "initiate_payment_approval_card" title: "Approve a payment"
+      verb: VERB_READ min_clearance: CLEARANCE_INTERNAL sets: ["payments"]
+      audience: [AUDIENCE_PERSON]
+    };
+  }
+
+  // The runner's own call, from the workflow and never from the loop.
+  rpc CreateTask(Empty) returns (Empty) {
+    option (garm.tool.v1.tool) = {
+      name: "create_task" title: "Open a task" verb: VERB_WRITE
+      min_clearance: CLEARANCE_INTERNAL sets: ["tasks"]
+      audience: [AUDIENCE_RUNNER]
+    };
+  }
+
+  // An agent: a person starts a run from a console, and another agent may
+  // invoke it once depth-two delegation exists. Both, so both are listed.
+  rpc Invoke(Empty) returns (Empty) {
+    option (garm.tool.v1.tool) = {
+      name: "support_assistant" title: "Support assistant" verb: VERB_WRITE
+      min_clearance: CLEARANCE_INTERNAL sets: ["agents"]
+      audience: [AUDIENCE_PERSON, AUDIENCE_AGENT]
+    };
+  }
+
+  // Declared before audiences existed. Reads as AGENT, which is what keeps
+  // every catalogue built to date listing to a model exactly as it did.
+  rpc GetStatus(Empty) returns (Empty) {
+    option (garm.tool.v1.tool) = {
+      name: "get_status" title: "Read a status" verb: VERB_READ
+      min_clearance: CLEARANCE_INTERNAL sets: ["payments"]
+    };
+  }
+}

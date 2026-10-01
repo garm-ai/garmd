@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	"github.com/garm-ai/contracts/policy"
 	"github.com/garm-ai/garmd/internal/catalogue"
 	"github.com/garm-ai/garmd/internal/tool"
 	"github.com/garm-ai/garmd/internal/toolplane"
@@ -27,6 +28,16 @@ import (
 type plane struct {
 	cat  *catalogue.Catalogue
 	core *toolplane.Core
+
+	// reg is core's own compartment taxonomy, lifted out so the handler can
+	// pin it on the request.
+	//
+	// A folded compartment bitset is meaningful only against the registry
+	// that produced it, and the one that has to read this request's answer is
+	// this core's. Holding it here rather than reaching through core at every
+	// request is so that "the generation this request is on" is one value the
+	// handler reads once, beside the catalogue and the chain.
+	reg *policy.Registry
 }
 
 // planeFor returns the chain for this generation, building it on first sight.
@@ -57,8 +68,42 @@ func (h *Handler) planeFor(cat *catalogue.Catalogue) (*plane, error) {
 	if err != nil {
 		return nil, err
 	}
-	h.plane.Store(p)
+	// Published only if it is not OLDER than what is already there.
+	//
+	// Two requests can straddle a reload: one that read the previous
+	// generation reaches this line after the reload has published the new
+	// one, and an unconditional store would put the outgoing chain back.
+	// Every request after that would rebuild — compiling every plan in the
+	// artifact — and the pair would flip for as long as stragglers kept
+	// arriving.
+	//
+	// Ordered by LoadedAt, which is the only ordering a generation carries: a
+	// digest is a content hash and says nothing about which came first. The
+	// store is not consulted, deliberately — reading Current() here would be a
+	// second read of the catalogue inside a request that has already taken
+	// one, which is the one thing the immutable-generation design forbids.
+	// Equal timestamps (a fixture, an injected clock) fall through to the
+	// later builder, which is what this did before there was a rule at all.
+	if cur := h.plane.Load(); cur == nil || !p.cat.LoadedAt.Before(cur.cat.LoadedAt) {
+		h.plane.Store(p)
+	}
 	return p, nil
+}
+
+// Check builds the chain for a generation and throws it away.
+//
+// The pre-flight half of a reload: it answers "could this deployment govern
+// that artifact" about a candidate nothing is serving yet, which is a question
+// that has to be settled BEFORE the store swaps, because a Store has no way to
+// put a generation back.
+//
+// It does not publish, and that is the whole difference from Prepare. A
+// candidate's chain in the cache would be a chain for a generation no request
+// can read — every request arriving before the swap would find it, miss, and
+// rebuild the outgoing one.
+func (h *Handler) Check(cat *catalogue.Catalogue) error {
+	_, err := h.newPlane(cat)
+	return err
 }
 
 // Prepare builds the chain for a generation up front, so a catalogue this
@@ -70,12 +115,36 @@ func (h *Handler) planeFor(cat *catalogue.Catalogue) (*plane, error) {
 // caller. A tool declaring supervision nobody will apply is exactly what
 // AddTools refuses, and the refusal is worth nothing if it arrives one
 // request at a time after the deploy is green.
+//
+// It PUBLISHES the chain it builds, so it is for the generation that is
+// current: at boot, and at the moment a reload has made one current. The
+// pre-flight of a candidate is Check, below.
 func (h *Handler) Prepare(cat *catalogue.Catalogue) error {
 	_, err := h.planeFor(cat)
 	return err
 }
 
 func (h *Handler) newPlane(cat *catalogue.Catalogue) (*plane, error) {
+	// Before anything is built, because it is a property of the catalogue and
+	// not of the chain. ServeHTTP answers ListToolsPath BEFORE it looks a route
+	// up — the listing is not a route — so a tool declared at that path would be
+	// permanently shadowed: never invoked, never refused, never reported, and
+	// every call to it answered with somebody's tool list. The catalogue would
+	// go on saying the tool is served.
+	//
+	// It lives here rather than in AddTools because ListToolsPath is this
+	// surface's, and toolplane does not know that this deployment has a front
+	// door with reserved paths on it. Here it covers the boot mount, the lazy
+	// build and the reload pre-flight, which is every way a generation arrives.
+	for _, d := range cat.Defs {
+		if d.FullMethod == ListToolsPath {
+			return nil, fmt.Errorf(
+				"mounting catalogue %s: %s is declared at %s, which is the tool "+
+					"listing endpoint and not a route: a tool there could never be "+
+					"called", cat.Digest, d.FQN, ListToolsPath)
+		}
+	}
+
 	core, err := toolplane.NewCore(toolplane.CoreConfig{
 		HashKey: h.HashKey,
 		// From the catalogue, not from this binary's configuration. Which
@@ -100,7 +169,7 @@ func (h *Handler) newPlane(cat *catalogue.Catalogue) (*plane, error) {
 			return nil, fmt.Errorf("registering %s: %w", d.FullMethod, err)
 		}
 	}
-	return &plane{cat: cat, core: core}, nil
+	return &plane{cat: cat, core: core, reg: core.Registry()}, nil
 }
 
 // requestFactory builds an empty request from the catalogue's descriptor.

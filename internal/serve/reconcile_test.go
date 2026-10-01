@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,13 +21,21 @@ import (
 // even though the test would pass without one.
 type fakeDiscoverer struct {
 	services []transport.Service
-	err      error
-	calls    atomic.Int64
+	// enumeration and partial are the two kinds of incompleteness a round
+	// reports. A test sets one to say "this sweep did not hear everything".
+	enumeration error
+	partial     map[string]error
+	err         error
+	calls       atomic.Int64
 }
 
-func (f *fakeDiscoverer) Services(context.Context) ([]transport.Service, error) {
+func (f *fakeDiscoverer) Services(context.Context) (transport.Round, error) {
 	f.calls.Add(1)
-	return f.services, f.err
+	return transport.Round{
+		Services:    f.services,
+		Enumeration: f.enumeration,
+		Partial:     f.partial,
+	}, f.err
 }
 func (f *fakeDiscoverer) Watch(context.Context) (<-chan transport.Event, error) {
 	return nil, errors.New("not implemented")
@@ -167,3 +176,73 @@ func TestRunSweepsImmediately(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// A quarantine is not lifted by a round that could not hear the service.
+//
+// This is the asymmetry the whole incomplete-round contract exists for.
+// Quarantining is driven by a POSITIVE observation — an instance advertising
+// a hash that does not match — and a reply that never arrived cannot produce
+// one. Lifting is driven by the ABSENCE of that observation, and a reply that
+// never arrived is indistinguishable from a service that has stopped
+// misbehaving.
+//
+// The service scales out, a reply goes missing, and the sweep that would
+// otherwise say "the mismatch is gone" must say nothing instead. Before
+// discovery could report incompleteness, this was a silent green light.
+func TestAnIncompleteRoundDoesNotLiftAQuarantine(t *testing.T) {
+	f := &fakeDiscoverer{services: []transport.Service{
+		{Name: "svc", Identity: drifted, Subjects: []string{subject}},
+	}}
+	r := &Reconciler{Store: storeWith(t, "acme.v1", good), Discoverer: f}
+	r.sweep(context.Background())
+	if _, bad := r.Quarantined("acme.v1"); !bad {
+		t.Fatal("setup: the first sweep produced no quarantine")
+	}
+
+	// The next sweep hears only the healthy replica of the same service, and
+	// knows it heard only part of it.
+	f.services = []transport.Service{
+		{Name: "svc", Identity: good, Subjects: []string{subject}},
+	}
+	f.partial = map[string]error{
+		"svc": fmt.Errorf("%w: svc answered 1 of the 2 instances the enumeration counted",
+			transport.ErrIncompleteRound),
+	}
+	r.sweep(context.Background())
+	if _, bad := r.Quarantined("acme.v1"); !bad {
+		t.Error("a partial round lifted the quarantine; the instance that did not " +
+			"answer may be the one still running the wrong contract")
+	}
+
+	// A round that heard the service in full is entitled to clear it.
+	f.partial = nil
+	r.sweep(context.Background())
+	if why, bad := r.Quarantined("acme.v1"); bad {
+		t.Errorf("a complete round did not clear the verdict: %s", why)
+	}
+}
+
+// An enumeration that came up short clears nothing at all, not even for a
+// package whose own service answered.
+//
+// When the plane-wide round is incomplete, garmd does not know which services
+// exist, so it cannot tell a service that stopped from one it never heard —
+// and every verdict rests on that distinction.
+func TestAnIncompleteEnumerationClearsNothing(t *testing.T) {
+	f := &fakeDiscoverer{services: []transport.Service{
+		{Name: "svc", Identity: drifted, Subjects: []string{subject}},
+	}}
+	r := &Reconciler{Store: storeWith(t, "acme.v1", good), Discoverer: f}
+	r.sweep(context.Background())
+	if _, bad := r.Quarantined("acme.v1"); !bad {
+		t.Fatal("setup: the first sweep produced no quarantine")
+	}
+
+	f.services = nil
+	f.enumeration = fmt.Errorf("%w: the plane-wide enumeration was cut short",
+		transport.ErrIncompleteRound)
+	r.sweep(context.Background())
+	if _, bad := r.Quarantined("acme.v1"); !bad {
+		t.Error("a sweep that could not enumerate the plane lifted a quarantine")
+	}
+}
