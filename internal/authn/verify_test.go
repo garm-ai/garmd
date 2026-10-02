@@ -253,7 +253,11 @@ func TestVerifyRejectsAForgedActChain(t *testing.T) {
 	if p.Clearance != toolv1.Clearance_CLEARANCE_CONFIDENTIAL {
 		t.Errorf("folding took the actor's RESTRICTED instead of the minimum; got %v", p.Clearance)
 	}
-	if !strings.Contains(strings.Join(p.Chain, ","), "orchestrator-1") {
+	subjects := make([]string, len(p.Chain))
+	for i, e := range p.Chain {
+		subjects[i] = e.Subject
+	}
+	if !strings.Contains(strings.Join(subjects, ","), "orchestrator-1") {
 		t.Errorf("Chain = %v, want it to record the actor", p.Chain)
 	}
 }

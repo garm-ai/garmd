@@ -525,7 +525,10 @@ func TestTheHopCarriesTheLedgerEventIdAndTheDelegationChain(t *testing.T) {
 	})
 
 	p := testPrincipal(toolv1.Clearance_CLEARANCE_INTERNAL)
-	p.Chain = []string{"employee:jdoe", "agent:support-assistant"}
+	p.Chain = []toolplane.ChainEntry{
+		{Subject: "employee:jdoe", Kind: toolv1.PrincipalKind_PRINCIPAL_KIND_USER},
+		{Subject: "agent:support-assistant", Kind: toolv1.PrincipalKind_PRINCIPAL_KIND_AGENT},
+	}
 	p.Actor = "agent:support-assistant"
 	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {
 		t.Fatalf("Invoke: %v", err)
@@ -546,6 +549,17 @@ func TestTheHopCarriesTheLedgerEventIdAndTheDelegationChain(t *testing.T) {
 		t.Errorf("act = %v; the delegated hop reached the resolver looking direct",
 			seen.GetAct())
 	}
+	// F22's other half: the forwarded entry must carry the kind the token
+	// actually asserted for it, not PRINCIPAL_KIND_UNSPECIFIED — core.go once
+	// dropped this unconditionally, since the day this code was written.
+	if got := seen.GetAct()[0].GetKind(); got != toolv1.PrincipalKind_PRINCIPAL_KIND_AGENT {
+		t.Errorf("act[0].kind = %s, want PRINCIPAL_KIND_AGENT — forwarded kinds must survive the hop", got)
+	}
+	// The new attribution field: who this run belongs to, sourced from Actor
+	// and never from anywhere act is folded.
+	if got := seen.GetAgent(); got != "agent:support-assistant" {
+		t.Errorf("agent = %q, want the chain's actor forwarded as attribution", got)
+	}
 }
 
 // An undelegated call asserts no delegation. A one-element chain is the
@@ -561,7 +575,7 @@ func TestADirectCallCarriesNoActChain(t *testing.T) {
 		})
 
 	p := testPrincipal(toolv1.Clearance_CLEARANCE_INTERNAL)
-	p.Chain = []string{p.Subject}
+	p.Chain = []toolplane.ChainEntry{{Subject: p.Subject}}
 	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -585,7 +599,7 @@ func TestTheContextOnTheHopCarriesNothingBesideItsAssertions(t *testing.T) {
 
 	p := testPrincipal(toolv1.Clearance_CLEARANCE_RESTRICTED)
 	p.Kind = toolv1.PrincipalKind_PRINCIPAL_KIND_USER
-	p.Chain = []string{p.Subject, "agent:support-assistant"}
+	p.Chain = []toolplane.ChainEntry{{Subject: p.Subject}, {Subject: "agent:support-assistant"}}
 	p.TokenID = "jti-do-not-forward"
 	p.Compartments = 1
 	if _, err := core.Invoke(context.Background(), p, testProcedure, testRequest()); err != nil {

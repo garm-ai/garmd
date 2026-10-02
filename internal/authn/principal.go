@@ -41,14 +41,21 @@ func Fold(c *Claims, reg *policy.Registry) (*toolplane.Principal, []string, erro
 		clearance    toolv1.Clearance
 		compartments policy.CompartmentSet
 		verbs        toolplane.VerbSet
-		chain        []string
+		chain        []toolplane.ChainEntry
 		dropped      []string
 		toolSets     []string
 		first        = true
 	)
 
 	for cur := c; cur != nil; cur = cur.Act {
-		chain = append(chain, cur.Subject)
+		// Each entry's kind comes from THAT level's own claims — the same
+		// node cur.Garm.Clearance etc. are read from a few lines down — so
+		// this carries what the token actually asserted for that hop rather
+		// than inventing one for an actor nothing attested.
+		chain = append(chain, toolplane.ChainEntry{
+			Subject: cur.Subject,
+			Kind:    kindFromName(cur.Garm.Kind),
+		})
 
 		lvlClearance := toolv1.Clearance(toolv1.Clearance_value[cur.Garm.Clearance])
 		// SetLenient, not Set: an unknown compartment is an IdP typo or a
@@ -107,7 +114,7 @@ func Fold(c *Claims, reg *policy.Registry) (*toolplane.Principal, []string, erro
 	// Empty for a direct token, which is how the ledger tells a human
 	// calling directly from an agent calling on their behalf.
 	if len(chain) > 1 {
-		p.Actor = chain[len(chain)-1]
+		p.Actor = chain[len(chain)-1].Subject
 	}
 	return p, dropped, nil
 }

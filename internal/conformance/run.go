@@ -177,6 +177,19 @@ func runCase(
 	return compare(c.Expect, p, dropped, reg)
 }
 
+// chainSubjects is the subjects of a delegation chain, in order. The
+// conformance suite's own Expect.Chain is a shared vector format — []string,
+// subjects only — predating ChainEntry's kind; comparing against it is a
+// projection, not a loss of what this package itself verifies, since Kind is
+// already asserted separately below.
+func chainSubjects(chain []toolplane.ChainEntry) []string {
+	out := make([]string, len(chain))
+	for i, e := range chain {
+		out[i] = e.Subject
+	}
+	return out
+}
+
 // compare reports every field that disagrees, not just the first: a claim
 // shape that has drifted usually moves more than one.
 func compare(e *Expect, p *toolplane.Principal, dropped []string, reg *policy.Registry) error {
@@ -205,7 +218,7 @@ func compare(e *Expect, p *toolplane.Principal, dropped []string, reg *policy.Re
 	if p.Tenant != e.Tenant {
 		bad = append(bad, fmt.Sprintf("tenant: got %q want %q", p.Tenant, e.Tenant))
 	}
-	if !slices.Equal(p.Chain, e.Chain) {
+	if !slices.Equal(chainSubjects(p.Chain), e.Chain) {
 		bad = append(bad, fmt.Sprintf("chain: got %v want %v", p.Chain, e.Chain))
 	}
 	// Kind is the one field left optional, and deliberately: it is

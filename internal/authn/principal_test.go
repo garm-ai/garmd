@@ -83,6 +83,47 @@ func TestFoldIntersectsTheChain(t *testing.T) {
 	}
 }
 
+// F22's garmd-internal half. Fold must carry each chain entry's OWN kind —
+// read off that level's own `garm.kind`, the same claims node clearance and
+// compartments come from — rather than leaving every entry at
+// PRINCIPAL_KIND_UNSPECIFIED, which is what core.go forwarded into `act` for
+// as long as this went unchecked. Built from authn.Claims directly, not
+// chainClaims: that helper's claimLevel has no kind, and giving it one would
+// mean adding a field to every positional literal in this file for a value
+// only this test needs.
+func TestFoldCarriesEachChainEntrysOwnKind(t *testing.T) {
+	reg := testRegistry(t)
+	c := &authn.Claims{
+		Subject: "user:ada",
+		Garm: authn.GarmClaims{
+			Clearance: "CLEARANCE_CONFIDENTIAL", Verbs: []string{"READ"},
+			Kind: "PRINCIPAL_KIND_USER",
+		},
+		Act: &authn.Claims{
+			Subject: "agent:copilot",
+			Garm: authn.GarmClaims{
+				Clearance: "CLEARANCE_INTERNAL", Verbs: []string{"READ"},
+				Kind: "PRINCIPAL_KIND_AGENT",
+			},
+		},
+	}
+
+	p, _, err := authn.Fold(c, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Chain) != 2 {
+		t.Fatalf("Chain = %v, want both levels", p.Chain)
+	}
+	if p.Chain[0].Subject != "user:ada" || p.Chain[0].Kind != toolv1.PrincipalKind_PRINCIPAL_KIND_USER {
+		t.Errorf("Chain[0] = %+v, want user:ada/USER", p.Chain[0])
+	}
+	if p.Chain[1].Subject != "agent:copilot" || p.Chain[1].Kind != toolv1.PrincipalKind_PRINCIPAL_KIND_AGENT {
+		t.Errorf("Chain[1] = %+v, want agent:copilot/AGENT — the actor's OWN asserted "+
+			"kind, not UNSPECIFIED", p.Chain[1])
+	}
+}
+
 // The property that matters more than any single example: adding a hop can
 // never widen authority, whatever the added hop claims.
 func TestFoldNeverWidens(t *testing.T) {
@@ -162,7 +203,7 @@ func TestFoldDirectTokenHasNoActor(t *testing.T) {
 	if p.Actor != "" {
 		t.Errorf("Actor = %q, want empty for a direct token", p.Actor)
 	}
-	if len(p.Chain) != 1 || p.Chain[0] != "user:ada" {
+	if len(p.Chain) != 1 || p.Chain[0].Subject != "user:ada" {
 		t.Errorf("Chain = %v", p.Chain)
 	}
 }

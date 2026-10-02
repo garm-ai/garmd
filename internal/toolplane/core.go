@@ -985,6 +985,13 @@ func (c *Core) checkAvailability(t ToolDef, ev *ledger.Event) error {
 // to everything on the far side of the hop, and an exchange performed on that
 // reading would mint for the subject alone: a widening, arrived at by
 // silence.
+//
+// agent is NOT act, and the difference is the whole point of the field: act
+// is folded for authority (every verb, clearance and tool_set intersects
+// across it), so a party put there changes what the call may do. agent is
+// never folded and nothing downstream may authorize on it — it exists only
+// so attribution ("whose run was it") survives a hop without being load-
+// bearing for access the way act briefly, disastrously was.
 func (c *Core) withInvocationContext(
 	ctx context.Context, p *Principal, callID string,
 ) context.Context {
@@ -1006,16 +1013,27 @@ func (c *Core) withInvocationContext(
 			Subject: p.Subject,
 			Kind:    p.Kind,
 		},
+		// Attribution, never authorization (contracts' own comment on this
+		// field has the rule): whose run this call belongs to, as distinct
+		// from Principal/Act, which answer whose AUTHORITY it is. Sourced
+		// from Actor — the innermost chain entry — rather than invented here,
+		// so it is exactly as present as a real delegation chain makes it: a
+		// direct call (p.Actor == "") carries none, honestly, rather than a
+		// value nothing attested.
+		Agent:  p.Actor,
 		CallId: callID,
 	}
 	// Chain is [subject, actor, actor, …] — the fold's own order — so act is
-	// everything after the subject. Kind is not carried per hop: Principal
-	// holds one, for the subject, and inventing a kind for an actor would be
-	// an assertion nothing verified.
+	// everything after the subject. Each entry carries the kind asserted for
+	// it in the token's own claims (authn.Fold reads it off the same claims
+	// node as the subject's own clearance and compartments), so this is
+	// forwarding what the token verified — never inventing a kind for an
+	// actor nothing attested, which is why this was safe to leave unset for
+	// as long as it was wrongly assumed to be harmless.
 	if len(p.Chain) > 1 {
 		ic.Act = make([]*toolv1.Act, 0, len(p.Chain)-1)
-		for _, subject := range p.Chain[1:] {
-			ic.Act = append(ic.Act, &toolv1.Act{Subject: subject})
+		for _, entry := range p.Chain[1:] {
+			ic.Act = append(ic.Act, &toolv1.Act{Subject: entry.Subject, Kind: entry.Kind})
 		}
 	}
 	return callctx.NewContext(ctx, ic)

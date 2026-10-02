@@ -31,6 +31,15 @@ func (s VerbSet) Has(v toolv1.Verb) bool {
 // Intersect narrows a verb set, for folding a delegation chain (Plan B).
 func (s VerbSet) Intersect(o VerbSet) VerbSet { return s & o }
 
+// ChainEntry is one identity in the delegation chain: a subject together
+// with the kind asserted for IT, at that level of the token's own claims.
+// Fold reads both off the same claims node, so this is forwarding what the
+// token verified, never inventing a kind for an actor nothing attested.
+type ChainEntry struct {
+	Subject string
+	Kind    toolv1.PrincipalKind
+}
+
 // Principal is an authenticated caller. Plan A supplies it from Config;
 // Plan B derives it from a verified JWT.
 type Principal struct {
@@ -49,11 +58,10 @@ type Principal struct {
 	//
 	// It describes the SUBJECT, not the actor: on a delegated call this is
 	// the kind of whoever's authority is being exercised, and Actor names
-	// who is exercising it. Per-hop kinds would need Chain to carry more
-	// than strings, which is a wire change the tool-service-shell spec will
-	// force in its own time.
+	// who is exercising it. Per-hop kinds live on Chain, below — the wire
+	// change this comment used to say was still future work.
 	Kind         toolv1.PrincipalKind
-	Chain        []string // full delegation chain, for the ledger
+	Chain        []ChainEntry // full delegation chain, for the ledger and for forwarding
 	Tenant       string
 	Clearance    toolv1.Clearance
 	Compartments policy.CompartmentSet
